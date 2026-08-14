@@ -1,194 +1,147 @@
-# Proxifier Core 🚀
+# ADB Helper (ADB与Scrcpy远程控制助手)
 
 <p align="center">
-  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" width="100" height="100" alt="Proxifier Core Icon" />
+  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" width="100" height="100" alt="ADB Helper Logo" style="border-radius: 20%;" />
 </p>
 
 <p align="center">
-  <b>Android 平台轻量、高效的 SOCKS5 / HTTP 规则分流与透明代理路由器</b><br/>
-  <i>支持 KernelSU Root 透明代理 与 免 Root VpnService 双引擎</i>
+  <b>基于 Jetpack Compose 与纯 Kotlin 实现的强大 Android 端 ADB 客户端 & Scrcpy 屏幕镜像控制工具</b>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Platform-Android_8.0+-3DDC84.svg?style=flat&logo=android" alt="Platform" />
-  <img src="https://img.shields.io/badge/Language-Kotlin-7F52FF.svg?style=flat&logo=kotlin" alt="Kotlin" />
-  <img src="https://img.shields.io/badge/UI-Jetpack_Compose_M3-4285F4.svg?style=flat&logo=jetpackcompose" alt="Compose" />
-  <img src="https://img.shields.io/badge/Root-KernelSU%20%2F%20Magisk-critical.svg?style=flat" alt="KernelSU" />
-  <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=flat" alt="License" />
+  <img src="https://img.shields.io/badge/Platform-Android-green.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/Language-Kotlin-blue.svg" alt="Language" />
+  <img src="https://img.shields.io/badge/UI-Jetpack%20Compose%20(M3)-purple.svg" alt="Jetpack Compose" />
+  <img src="https://img.shields.io/badge/Architecture-MVVM%20%2B%20Coroutines-orange.svg" alt="Architecture" />
+  <img src="https://img.shields.io/badge/License-Apache%202.0-lightgrey.svg" alt="License" />
 </p>
 
 ---
 
-## 📖 项目简介 (Introduction)
+## 📖 项目简介 (Overview)
 
-**Proxifier Core** 是一款专为 Android 平台打造的专业级网络透明代理与规则分流路由工具。类似 PC 端的 Proxifier，它能将系统及各应用程序的网络流量精细化重定向至指定的 SOCKS5 或 HTTP 代理服务器。
-
-项目具备 **双引擎架构**：既可以在具备 Root 权限的设备上使用 **KernelSU / Magisk 透明代理引擎**（基于 iptables / ip6tables NAT 重定向，极低系统开销与极致延迟表现），也可以在未 Root 设备上无缝切换至标准 **Android VpnService 引擎**。
+**ADB Helper** 是一款无需借助电脑、直接在 Android 设备上运行的全功能 ADB 调试与远程控制助手。本应用内部完整实现了 **ADB 传输协议栈** 与 **Scrcpy 视频流解码控制协议**，让您可以随时随地通过手机或平板对另一台 Android 设备进行无线连接、屏幕镜像控制、深度应用管理、文件传输、命令调试和硬件状态监控。
 
 ---
 
-## ✨ 核心功能特性 (Key Features)
+## ✨ 核心功能 (Features)
 
-### 1. ⚡ 双工作模式引擎 (Dual Engine Architecture)
-- **KernelSU / Root 透明代理模式**：
-  - 基于 Linux 内核 `iptables` / `ip6tables` NAT 规则，将系统流量无感重定向至本地透明代理服务器。
-  - 内置高性能 `SO_ORIGINAL_DST` 与 `/proc/net/nf_conntrack` 原目的地址及应用 UID 还原机制。
-  - 支持 SELinux 策略动态规避 (`magiskpolicy` / `supolicy`) 与 Android 10+ 隐藏 API 限制绕过。
-  - **开销极低**：无需维护复杂虚拟网卡，减少内核-用户态二次拷贝，延迟更低。
-- **VPN Service 免 Root 模式**：
-  - 采用标准 Android `VpnService` 虚拟网卡 (TUN) 拦截网络流量。
-  - 内置 TCP 协议栈解析与连接中继引擎，支持全自动 IPv4 / IPv6 分流。
-  - 内置 UDP 53 端口 DNS 转发处理，防范 DNS 污染与泄漏。
+### 1. 🔗 多模式设备连接 (Multi-mode Connection)
+- **Wi-Fi 无线调试 (ADB over TCP/IP)**：支持直连指定 IP 与 5555 端口。
+- **Android 11+ 无线配对 (Wireless Pairing)**：支持输入 6 位配对码与随机端口完成安全配对并握手。
+- **USB OTG 有线直连**：通过 Type-C OTG 数据线连接被控设备，免网络延迟。
+- **本地历史设备**：自动记忆最近连接的设备信息，支持一键重连与设备管理。
+- **内置安全认证**：本地生成 RSA 2048 位密钥对，自动完成 ADB 认证握手与凭据管理。
 
-### 2. 🔀 强大的多维度链式分流规则 (Advanced Routing Rules)
-- **多条件匹配系统**：
-  - 📱 **应用分流 (App Packages)**：内置应用选择器，可指定特定 App 走代理、直连或拦截。
-  - 🌐 **域名分流 (Domain Matching)**：支持通配符与泛域名（例如 `*.google.com`、`github.com`、`all`）。
-  - 🎯 **IP / CIDR 网段分流 (IP Matching)**：支持精准 IP 及 CIDR 网段（例如 `192.168.1.0/24`、`10.0.0.0/8`）。
-  - 🔌 **端口与端口段 (Port Range)**：支持单端口或端口范围过滤（例如 `80`、`443`、`8080-8090`）。
-- **3 种流量动作策略**：
-  - `PROXY`（代理）：重定向至指定代理服务器。
-  - `DIRECT`（直连）：直接发起网络连接，绕过代理。
-  - `BLOCK` / `REJECT`（拦截）：拒绝匹配流量建立连接。
-- **多节点指定与故障旁路**：
-  - 支持为不同的规则指定不同的代理节点（多节点并发分流）。
-  - 支持 `ignoreIfProxyDown`（故障旁路模式）：当规则所指定的代理节点离线时，自动降级为直连，避免网络断连。
-- **规则优先级管理**：支持一键上下调整规则匹配顺序及单独启用/禁用开关。
+### 2. 🖥️ Scrcpy 低延迟屏幕镜像与控制 (Screen Mirroring & Control)
+- **硬解流传输**：被控端运行轻量化 `scrcpy-server`，主控端通过 Android `MediaCodec` + `SurfaceView` 实现超低延迟 H.264 视频硬解。
+- **全手势与触控交互**：支持单点轻触、拖动、滑动、长按，精准映射主控端手势到被控端屏幕。
+- **快捷按键控制**：内置返回键 (Back)、主屏幕 (Home)、多任务 (Recents)、电源键、音量增减等快捷指令。
+- **文字输入同步**：支持通过 ADB 直接向被控设备注入文本内容。
+- **高级投屏选项**：
+  - 支持画质码率、分辨率与最大帧率自定义。
+  - 支持投屏时关闭被控端屏幕（熄屏控制/保持亮屏）。
+  - 支持虚拟副屏模式（创建扩展显示屏）。
 
-### 3. 🌐 节点管理与多协议支持 (Proxy Management)
-- 支持 **SOCKS5**（支持用户名/密码认证）与 **HTTP/HTTPS CONNECT** 代理协议。
-- 支持 IPv4、IPv6 及域名主机地址。
-- **快速测速 (Latency Ping)**：支持单节点及全部节点一键并发延迟探测。
-- 节点颜色标识分类与活动节点一键切换。
+### 3. 📦 深度应用与进程管理 (App & Process Management)
+- **极速应用名称解析**：内置 `aapt2` 工具自动提取 APK `badging`，支持简体中文 (`zh-CN` / `zh-Hans`) 优先匹配，告别冷冰冰的包名。
+- **第三方应用 / 系统应用分类**：支持仅检索第三方应用加速加载，支持即时搜索与过滤。
+- **应用操作面板**：
+  - 🚀 一键启动应用 (`monkey` 启动入口)
+  - 🛑 强行停止应用 (`am force-stop`)
+  - 🗑️ 卸载应用 / 清除数据 (`pm clear` / `pm uninstall`)
+  - 📥 本地 APK 远程安装（支持流式推送并静默安装）
+- **可视化进度指示**：应用列表解析过程提供进度条实时反馈。
+- **进程监控与管理**：实时列出被控端运行中的进程列表 (`ps -ef`)，支持按 PID 强行终止进程。
 
-### 4. 📦 KernelSU / Magisk 动态模块生成 (One-Click Flashable Module)
-- App 内置 **一劳永逸版 Magisk / KernelSU 模块生成器**。
-- 生成规范的 `Proxifier_KernelSU_Module.zip` 刷机包，自动保存至系统 `Download/` 目录。
-- **桥接式热更新设计**：刷入模块一次即可，后续在 App 内增删改查分流规则，即时同步生效并支持开机自动应用，无需反复重新刷包。
+### 4. 📁 ADB 高速文件管理器 (File Explorer)
+- **内置 AdbSync 协议**：基于原生 ADB SYNC 协议实现高吞吐量文件传输。
+- **全功能文件操作**：支持目录树浏览、文件/文件夹新建、重命名、删除及详情查看。
+- **文件互传**：支持将本地文件/图片/安装包推送到远程设备，或将远程文件拉取到本地存储。
 
-### 5. 🔍 实时连接抓包与诊断分析 (Real-time Diagnostics & Logs)
-- 实时追踪所有进出站连接：应用名、包名、目标域名/IP、目标端口、匹配规则、所用节点、连接状态。
-- **SNI / Host 解析**：自动从 TLS ClientHello 或 HTTP Header 中嗅探目标域名。
-- **数据包分析**：支持查看首包 16 进制 Hex Dump 与 ASCII 明文预览。
-- 错误异常追踪与重试诊断。
+### 5. 💻 交互式 ADB 终端 (Interactive Terminal)
+- **原生 Shell 终端**：提供无缝的交互式 ADB Shell 执行环境。
+- **预设快捷指令集**：内置一键截屏、屏幕录制、重启设备、进入 Recovery/Fastboot、查看系统日志 (`logcat`)、电池信息查询等常用运维脚本。
+- **命令历史记录**：自动记录已执行指令，便于快速翻查与重复执行。
 
-### 6. 📱 便捷系统级集成 (System Integration)
-- **快捷设置磁贴 (Quick Settings Tile)**：下拉系统通知栏即可一键开启/关闭代理服务。
-- **开机自启 (Boot Receiver)**：支持系统启动完成后自动挂载分流规则并拉起服务。
-- **流量监控**：实时上下行速率计算与总吞吐量统计。
+### 6. 📊 硬件与系统仪表盘 (Device Dashboard)
+- **设备基础信息**：设备型号、品牌、制造商、Android 系统版本、SDK API 级别、CPU ABI 架构、屏幕分辨率。
+- **资源监控**：实时监控被控设备电池电量、充电状态、电池温度、RAM 运行内存占用以及内部存储空间使用率。
 
 ---
 
-## 📱 界面预览 (UI Showcase)
+## 🛠️ 技术架构 (Tech Stack)
 
-| 仪表盘 (Dashboard) | 节点管理 (Proxies) | 分流规则 (Rules) | KernelSU (Root) | 日志抓包 (Logs) |
-| :---: | :---: | :---: | :---: | :---: |
-| 📊 实时速率与状态监控 | 🌐 节点列表与延迟测速 | 🔀 应用/域名/IP分流配置 | ⚡ 模块导出与规则应用 | 🔍 实时连接与Hex预览 |
-
----
-
-## 🛠️ 使用指南 (Getting Started)
-
-### 模式一：免 Root 使用 (VpnService Mode)
-1. 打开应用，进入 **「仪表盘」** 页面。
-2. 切换运行模式为 **「VPN Service (Non-Root)」**。
-3. 进入 **「代理节点」** 页面，点击右下角 **「+」** 添加你的 SOCKS5 或 HTTP 代理服务器，并设为活动节点。
-4. 进入 **「分流规则」** 页面，配置所需的应用分流、域名分流或 IP 规则（默认已包含常见规则模板）。
-5. 回到仪表盘，点击中心大按钮启动代理。初次启动会弹出系统 VPN 权限申请，点击 **「确定」** 即可。
-
-### 模式二：KernelSU / Magisk Root 透明代理 (Root Mode)
-1. 确保设备已安装 **KernelSU**、**APatch** 或 **Magisk** 并授予本应用 Root 权限。
-2. 在 **「仪表盘」** 切换运行模式为 **「KernelSU / Root Transparent」**。
-3. 配置好代理节点与分流规则。
-4. 进入 **「KernelSU」** 页面：
-   - 点击 **「应用当前规则」**：App 将即时通过 Root Shell 写入 iptables 规则并启动透明中继服务。
-   - 点击 **「导出动态刷机模块 (ZIP)」**：App 将在系统的 `Download/` 文件夹下生成 `Proxifier_KernelSU_Module.zip`。
-   - 打开 KernelSU / Magisk 管理器，从本地安装该 ZIP 模块并重启设备。
-   - 此后设备开机即自动生效，后续在 App 内调整规则无需重新刷入模块。
+- **UI 框架**：Jetpack Compose (Material 3) + Edge-to-Edge 全面屏设计
+- **开发语言**：Kotlin 2.0+
+- **架构模式**：MVVM + Kotlin Coroutines & Flow (响应式状态管理)
+- **ADB 协议实现**：纯 Kotlin 实现的 Socket 通信协议，覆盖 `CNXN`、`AUTH`、`OPEN`、`OKAY`、`CLSE`、`WRTE` 及 `SYNC` 原生协议
+- **编解码流**：Android MediaCodec (H.264 NALU 解析与表面渲染)
+- **资源解析**：针对 aapt2 与 dumpsys 的流式管道数据解析器
 
 ---
 
-## 📋 分流规则配置示例 (Rule Configuration Examples)
+## 🚀 快速上手 (Getting Started)
 
-| 规则名称 | 目标包名 (Packages) | 目标域名 (Domains) | 目标 IP (CIDR) | 动作 (Action) | 适用场景 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **局域网直连** | - | `*.local` | `10.0.0.0/8`, `192.168.0.0/16`, `127.0.0.0/8` | `DIRECT` | 避免局域网设备与内网服务走代理 |
-| **特定应用代理** | `com.android.chrome`, `com.twitter.android` | - | - | `PROXY` | 仅将指定浏览器和 App 进行代理 |
-| **开发服务分流** | - | `*.github.com`, `*.docker.com` | - | `PROXY (指定节点)` | 让开发相关域名走高速专用节点 |
-| **广告拦截** | - | `*.admob.com`, `*.doubleclick.net` | - | `BLOCK` | 屏蔽常见广告追踪与分析域名 |
+### 1. 准备被控端 Android 设备
+1. 进入 **设置 -> 关于手机**，连续点击 7 次“版本号”以启用 **开发者选项**。
+2. 进入 **开发者选项**：
+   - 开启 **USB 调试**。
+   - 若使用无线调试（Android 11+），开启 **无线调试**。
+   - 若为 MIUI/HyperOS/ColorOS/OriginOS 等定制系统，建议开启 **“USB 调试（安全设置）”** 以允许模拟点击。
 
----
-
-## 🏗️ 技术架构 (Architecture)
-
-```
-app/src/main/java/com/yangyx/proxy/
-├── MainActivity.kt                # 单 Activity 结构，Compose 路由导航
-├── data/
-│   ├── db/                        # Room 数据库 (AppDatabase, DAO)
-│   ├── model/                     # 数据实体 (ProxyServer, ProxyRule, ConnectionLog 等)
-│   └── repository/                # 数据仓库层
-├── engine/
-│   ├── KernelSuManager.kt         # iptables 脚本构建与 Magisk 模块打包
-│   ├── LocalTransparentProxyServer.kt # 本地透明代理服务、SO_ORIGINAL_DST 还原与 SOCKS5/HTTP 握手
-│   ├── VpnProxyService.kt         # Android VpnService TUN 网卡管理与 TCP/UDP 协议栈
-│   ├── SocketUidResolver.kt       # 端口与应用 UID / PackageName 映射反查
-│   ├── Socks5Tester.kt            # 节点延迟与连通性检测器
-│   └── RootShellManager.kt        # Root Shell 执行器
-├── service/
-│   ├── KernelSuBootService.kt     # Root 开机自启前台服务
-│   └── ProxyTileService.kt        # Quick Settings 快捷设置下拉磁贴
-├── receiver/
-│   └── BootReceiver.kt            # 系统开机广播监听
-└── ui/
-    ├── screens/                   # Compose 页面 (Dashboard, Proxies, Rules, KernelSu, Logs)
-    ├── theme/                     # Material 3 主题与配色
-    └── viewmodel/                 # MVVM 架构 ViewModel
-```
+### 2. 建立连接
+- **方式 A：无线配对 (Android 11+)**
+  1. 在被控设备进入“无线调试 -> 使用配对码配对”。
+  2. 在 ADB Helper 中输入被控端的 IP 地址、配对端口及 6 位配对码，点击 **配对**。
+  3. 配对成功后，输入无线调试主界面的服务端口并点击 **连接**。
+- **方式 B：传统网络调试 (端口 5555)**
+  1. 确保两台设备处于同一 Wi-Fi 局域网下。
+  2. 在 ADB Helper 中输入被控设备 IP 及 `5555`，点击 **连接**。
+  3. 被控设备弹出“允许 USB 调试吗？”提示时，勾选“一律允许”并点击 **确定**。
+- **方式 C：OTG 有线连接**
+  1. 使用 OTG 转接线将两台手机直连。
+  2. 授予 ADB Helper USB 设备访问权限即可秒级连接。
 
 ---
 
-## 🔧 构建与编译 (Build & Compilation)
+## 📦 项目构建 (Build & Run)
 
-### 环境要求
-- **Android Studio**: Ladybug / Meerkat (2024.2+) 或更高版本
-- **JDK**: OpenJDK 11 或 17
-- **Android SDK**: `compileSdk 36`, `minSdk 24` (Android 7.0+)
-- **Gradle**: 8.x + Kotlin 2.x
-
-### 本地编译步骤
 ```bash
-# 1. 克隆本仓库
-git clone https://github.com/<your-username>/proxifier-android.git
-cd proxifier-android
+# 克隆仓库
+git clone https://github.com/your-username/AdbHelper.git
+cd AdbHelper
 
-# 2. 编译 Debug APK
-./gradlew assembleDebug
+# 使用 Gradle 构建 Debug APK
+gradle assembleDebug
 
-# 3. 输出文件位于
+# 构建输出路径
 # app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ---
 
-## 🔒 权限说明 (Permissions)
-
-- `android.permission.INTERNET`: 用于建立代理与网络中继连接。
-- `android.permission.BIND_VPN_SERVICE`: 用于免 Root 模式下建立 VpnService。
-- `android.permission.QUERY_ALL_PACKAGES`: 用于在规则配置时读取已安装应用列表与图标。
-- `android.permission.RECEIVE_BOOT_COMPLETED`: 用于开机自启动服务与恢复透明代理规则。
-- `android.permission.POST_NOTIFICATIONS`: 用于前台服务保活与通知展示。
-- `Root 权限 (可选)`: 仅在启用 KernelSU / Root 透明代理模式时需要。
-
----
-
 ## ⚠️ 免责声明 (Disclaimer)
 
-1. 本软件仅供网络技术学习、网络协议分析与合法的日常网络优化使用。
-2. 请在遵守当地法律法规的前提下使用本软件。开发者不对任何由于不正当使用本软件而造成的后果承担责任。
+1. 本工具仅供开发者调试、设备维护及个人合法学习交流使用。
+2. 在使用终端执行 `rm`、`kill` 或系统级指令前，请确认命令准确性，因操作不当引起的数据丢失由使用者自行负责。
 
 ---
 
-## 📄 开源许可证 (License)
+## 📄 开源协议 (License)
 
-本项目采用 [Apache-2.0 License](LICENSE) 开源。欢迎提交 PR 和 Issue！
+```
+Copyright 2026 YangYX
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
