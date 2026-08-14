@@ -1,0 +1,6 @@
+{
+  "name": "ADB Helper",
+  "description": "ADB与Scrcpy远程控制助手 - 支持一键连接、屏幕镜像控制、文件管理、命令终端、系统监控及应用管理",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
