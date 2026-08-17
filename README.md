@@ -1,7 +1,7 @@
 # ADB Helper (ADB与Scrcpy远程控制助手)
 
 <p align="center">
-  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.webp" width="100" height="100" alt="ADB Helper Logo" style="border-radius: 20%;" />
+  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" width="100" height="100" alt="ADB Helper Logo" style="border-radius: 20%;" />
 </p>
 
 <p align="center">

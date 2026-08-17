@@ -56,6 +56,7 @@ class AdbConnection(
             val s = Socket()
             s.connect(java.net.InetSocketAddress(ip, port), timeoutMs)
             s.tcpNoDelay = true
+            s.keepAlive = true
             s.receiveBufferSize = 2 * 1024 * 1024 // 2MB receive buffer for high bitrate streaming
             s.sendBufferSize = 512 * 1024
             s.soTimeout = 10000

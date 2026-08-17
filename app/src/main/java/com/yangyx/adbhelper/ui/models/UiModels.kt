@@ -29,3 +29,17 @@ data class RemoteProcessItem(
     val memUsage: String,
     val name: String
 )
+
+data class LocalAppItem(
+    val packageName: String,
+    val appName: String,
+    val versionName: String = "",
+    val versionCode: Long = 0L,
+    val icon: android.graphics.drawable.Drawable? = null,
+    val sourceDir: String,
+    val splitSourceDirs: List<String> = emptyList(),
+    val totalSizeBytes: Long = 0L,
+    val isSystemApp: Boolean = false,
+    val isSingleApk: Boolean = true
+)
+

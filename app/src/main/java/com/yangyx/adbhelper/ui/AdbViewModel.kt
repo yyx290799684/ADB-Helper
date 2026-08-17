@@ -2,7 +2,10 @@ package com.yangyx.adbhelper.ui
 
 import android.app.Application
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.yangyx.adbhelper.adb.AdbConnection
@@ -15,10 +18,13 @@ import com.yangyx.adbhelper.data.AppDatabase
 import com.yangyx.adbhelper.data.entity.DeviceEntity
 import com.yangyx.adbhelper.data.repository.AdbRepository
 import com.yangyx.adbhelper.scrcpy.ScrcpyController
+import com.yangyx.adbhelper.ui.models.LocalAppItem
 import com.yangyx.adbhelper.ui.models.RemoteAppItem
 import com.yangyx.adbhelper.ui.models.RemoteProcessItem
 import com.yangyx.adbhelper.ui.models.SystemInfo
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -169,6 +175,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     val systemInfo: StateFlow<SystemInfo> = _systemInfo.asStateFlow()
 
     // App & Process Manager state
+    private var refreshAppsJob: Job? = null
+    private var refreshProcessesJob: Job? = null
+    private var loadLocalAppsJob: Job? = null
+
     private val _installedApps = MutableStateFlow<List<RemoteAppItem>>(emptyList())
     val installedApps: StateFlow<List<RemoteAppItem>> = _installedApps.asStateFlow()
 
@@ -183,6 +193,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _runningProcesses = MutableStateFlow<List<RemoteProcessItem>>(emptyList())
     val runningProcesses: StateFlow<List<RemoteProcessItem>> = _runningProcesses.asStateFlow()
+
+    // Local installed apps (on controller device) for remote installation
+    private val _localInstalledApps = MutableStateFlow<List<LocalAppItem>>(emptyList())
+    val localInstalledApps: StateFlow<List<LocalAppItem>> = _localInstalledApps.asStateFlow()
+
+    private val _isLocalAppsLoading = MutableStateFlow(false)
+    val isLocalAppsLoading: StateFlow<Boolean> = _isLocalAppsLoading.asStateFlow()
 
     private val _actionMessage = MutableStateFlow<String?>(null)
     val actionMessage: StateFlow<String?> = _actionMessage.asStateFlow()
@@ -221,6 +238,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 )
 
                 _connectionState.value = ConnectionState.Connected(ip, deviceName)
+                com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), deviceName, ip)
 
                 // Initialize default data
                 refreshFiles()
@@ -249,6 +267,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 val deviceName = if (model.isNotEmpty()) "$brand $model" else conn.deviceBanner
 
                 _connectionState.value = ConnectionState.Connected("USB OTG 设备", deviceName)
+                com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), deviceName, "USB OTG")
                 refreshFiles()
                 refreshSystemInfo()
                 refreshProcesses()
@@ -260,6 +279,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
         scrcpyController?.stopMirroring()
         scrcpyController = null
         activeConnection?.disconnect()
@@ -550,9 +570,24 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // App Manager
-    fun refreshApps() {
+    fun refreshApps(force: Boolean = false) {
         val conn = activeConnection ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        if (_isAppLoading.value && !force) {
+            // Already running
+            return
+        }
+        if (refreshAppsJob?.isActive == true) {
+            if (force) {
+                refreshAppsJob?.cancel()
+            } else {
+                return
+            }
+        }
+        if (!force && _installedApps.value.isNotEmpty()) {
+            return
+        }
+
+        refreshAppsJob = viewModelScope.launch(Dispatchers.IO) {
             val logSb = StringBuilder()
             fun log(msg: String) {
                 val timeStr = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
@@ -569,192 +604,238 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val labelMap = mutableMapOf<String, String>()
 
-                // Step 1: Detect target CPU ABI
-                val abi = conn.executeShell("getprop ro.product.cpu.abi").trim()
-                log("检测到被控端 CPU 架构: $abi")
-                val aapt2Asset = if (abi.contains("64") || abi.contains("aarch64")) {
+                // Step 1: Query device info for aapt2 diagnostics
+                log("1. 收集被控端设备环境信息与 CPU 架构...")
+                val abiProp = conn.executeShell("getprop ro.product.cpu.abi").trim()
+                val abiList = conn.executeShell("getprop ro.product.cpu.abilist").trim()
+                val osVer = conn.executeShell("getprop ro.build.version.release").trim()
+                val sdkVer = conn.executeShell("getprop ro.build.version.sdk").trim()
+                val selinuxMode = conn.executeShell("getenforce 2>/dev/null").trim()
+                val currentUid = conn.executeShell("id 2>/dev/null").trim()
+                
+                log("  [设备信息] Android $osVer (SDK $sdkVer) | SELinux: $selinuxMode | UID: $currentUid")
+                log("  [CPU架构] primary abi: '$abiProp', abilist: '$abiList'")
+
+                val fullAbi = "$abiProp $abiList".lowercase()
+                val aapt2Asset = if (fullAbi.contains("64") || fullAbi.contains("aarch64")) {
                     "aapt2-arm64-v8a"
                 } else {
                     "aapt2-armeabi-v7a"
                 }
                 val aaptRemotePath = "/data/local/tmp/aapt2"
 
-                // Step 2: Check / Push aapt2 binary
-                log("1. 检查远端 $aaptRemotePath 是否已存在并可运行...")
-                val lsOut = conn.executeShell("ls -l $aaptRemotePath").trim()
-                val fileExists = !lsOut.contains("No such file") &&
-                        !lsOut.contains("not found") &&
-                        !lsOut.contains("inaccessible") &&
-                        lsOut.isNotEmpty()
+                // Step 2: Check & verify aapt2 executable status
+                log("2. 检查远端 $aaptRemotePath 二进制可执行状态...")
+                val lsCmd = "ls -l $aaptRemotePath"
+                val lsOut = conn.executeShell("$lsCmd 2>&1").trim()
+                log("  [CMD] $lsCmd")
+                log("  [OUT] $lsOut")
 
-                var aaptWorking = false
-                if (fileExists) {
-                    val verOut = conn.executeShell("$aaptRemotePath version").trim()
-                    if (!verOut.contains("not found") && !verOut.contains("inaccessible") && !verOut.contains("Permission denied") && !verOut.contains("Exec format error") && verOut.isNotEmpty()) {
-                        aaptWorking = true
-                        log("aapt2 已在远端就绪: $verOut")
-                    } else {
-                        log("aapt2 文件存在但测试运行异常: $verOut")
-                    }
-                }
+                val verCmd = "$aaptRemotePath version"
+                val verTestRaw = conn.executeShell("$verCmd 2>&1; echo \"___EC:$?\"").trim()
+                val verOutput = verTestRaw.substringBefore("___EC:").trim()
+                val verEc = verTestRaw.substringAfter("___EC:", "").trim()
+
+                log("  [CMD] $verCmd")
+                log("  [EC] $verEc | [OUT] $verOutput")
+
+                var aaptWorking = verEc == "0" && (verOutput.contains("Android Asset Packaging Tool") || verOutput.contains("aapt2"))
 
                 if (!aaptWorking) {
-                    log("aapt2 未就绪，开始推送合适架构的资源文件 ($aapt2Asset -> $aaptRemotePath)...")
+                    log("aapt2 当前不可用，重新推送二进制 ($aapt2Asset -> $aaptRemotePath)...")
                     try {
                         val syncClient = AdbSyncClient(conn)
                         getApplication<Application>().assets.open(aapt2Asset).use { inputStream ->
                             syncClient.pushFile(inputStream, aaptRemotePath)
                         }
-                        conn.executeShell("chmod 755 $aaptRemotePath")
-                        log("$aapt2Asset 推送成功，已设置 chmod 755")
+                        val chmodOut = conn.executeShell("chmod 755 $aaptRemotePath 2>&1").trim()
+                        if (chmodOut.isNotEmpty()) log("  [chmod 755 OUT] $chmodOut")
 
-                        val retryOut = conn.executeShell("$aaptRemotePath version").trim()
-                        log("推送后测试 $aaptRemotePath version 输出: $retryOut")
-                        if (!retryOut.contains("not found") && !retryOut.contains("inaccessible") && !retryOut.contains("Permission denied") && !retryOut.contains("Exec format error") && retryOut.isNotEmpty()) {
+                        val retestRaw = conn.executeShell("$verCmd 2>&1; echo \"___EC:$?\"").trim()
+                        val retestOut = retestRaw.substringBefore("___EC:").trim()
+                        val retestEc = retestRaw.substringAfter("___EC:", "").trim()
+                        log("  [推送后测试 CMD] $verCmd")
+                        log("  [推送后测试 EC] $retestEc | [OUT] $retestOut")
+
+                        if (retestEc == "0" && (retestOut.contains("Android Asset Packaging Tool") || retestOut.contains("aapt2"))) {
                             aaptWorking = true
+                            log("✓ aapt2 远端部署验证成功")
+                        } else {
+                            log("✗ aapt2 远端执行失败，可能受系统架构兼容性或 SELinux/动态链接限制")
                         }
                     } catch (e: Exception) {
                         log("推送 aapt2 发生异常: ${e.message}")
                     }
                 }
 
-                // Get third-party packages first to track exact progress count
-                val userAppsRaw = conn.executeShell("pm list packages -3").trim()
-                val userAppsList = userAppsRaw.lines().mapNotNull { line ->
-                    val p = line.replace("package:", "").trim()
-                    if (p.isNotEmpty()) p else null
+                // Step 3: Fetch 3rd-party user applications
+                log("3. 获取第三方应用列表与 APK 路径 (pm list packages -3 -f)...")
+                val pmListCmd = "pm list packages -3 -f"
+                val userAppsRaw = conn.executeShell("$pmListCmd 2>&1").trim()
+                
+                data class AppApkEntry(val pkg: String, val apk: String)
+                val userAppsList = mutableListOf<AppApkEntry>()
+                userAppsRaw.lines().forEach { line ->
+                    val trimmed = line.trim()
+                    if (trimmed.startsWith("package:")) {
+                        val withoutPrefix = trimmed.removePrefix("package:")
+                        val apk = withoutPrefix.substringBeforeLast("=")
+                        val pkg = withoutPrefix.substringAfterLast("=")
+                        if (pkg.isNotEmpty() && apk.isNotEmpty()) {
+                            userAppsList.add(AppApkEntry(pkg, apk))
+                        }
+                    }
                 }
                 val totalUserApps = userAppsList.size
+                log("检测到第三方应用共 $totalUserApps 个")
 
-                // Step 3: Run aapt2 dump badging ONLY for 3rd-party apps (pm list packages -3 -f)
-                if (aaptWorking) {
-                    log("2. 使用 $aaptRemotePath dump badging 批量解析第三方应用名称 ($totalUserApps 个应用)...")
-                    _appLoadingStatus.value = "正在解析第三方应用名称 (0 / $totalUserApps)..."
-
-                    val aaptScript = "pm list packages -3 -f | tr -d '\\r' | while read -r line; do " +
-                            "pkg=\"\${line##*=}\"; " +
-                            "apk=\"\${line#package:}\"; " +
-                            "apk=\"\${apk%=*}\"; " +
-                            "if [ -n \"\$pkg\" ] && [ -n \"\$apk\" ]; then " +
-                            "echo \"===PKG:\$pkg\"; " +
-                            "echo \"===APK:\$apk\"; " +
-                            "$aaptRemotePath dump badging \"\$apk\" 2>/dev/null | grep -E \"application-label|application:\"; " +
-                            "fi; " +
-                            "done"
-
-                    var currentPkg: String? = null
-                    var currentApk: String? = null
-                    var currentZhCnLabel: String? = null
-                    var currentZhLabel: String? = null
-                    var currentDefLabel: String? = null
-                    var currentAppLabel: String? = null
-
-                    fun cleanLabel(raw: String): String? {
-                        val t = raw.trim()
-                        if (t.isEmpty()) return null
-                        if (t.startsWith("0x") || t.startsWith("@0x") || t.startsWith("@string/") || t.startsWith("@17") || t.startsWith("@android:")) return null
-                        if (t.matches(Regex("^@?[0-9]+$"))) return null
-                        return t
-                    }
-
-                    var parseCount = 0
-                    var failCount = 0
-
-                    fun commitCurrentPkg() {
-                        val pkg = currentPkg ?: return
-                        val bestLabel = currentZhCnLabel ?: currentZhLabel ?: currentDefLabel ?: currentAppLabel
-                        if (!bestLabel.isNullOrBlank()) {
-                            labelMap[pkg] = bestLabel
-                        } else {
-                            failCount++
-                            log("aapt2 未匹配到 Label: [$pkg] (APK: ${currentApk ?: "未知"})")
-                        }
-                        currentPkg = null
-                        currentApk = null
-                        currentZhCnLabel = null
-                        currentZhLabel = null
-                        currentDefLabel = null
-                        currentAppLabel = null
-                    }
-
-                    conn.executeShellStream(aaptScript) { line ->
-                        val trimmed = line.trim()
-                        if (trimmed.startsWith("===PKG:")) {
-                            commitCurrentPkg()
-                            currentPkg = trimmed.substring("===PKG:".length).trim()
-                            parseCount++
-                            if (parseCount % 10 == 0 || parseCount == totalUserApps) {
-                                val prog = if (totalUserApps > 0) parseCount.toFloat() / totalUserApps else 0f
-                                _appLoadingProgress.value = prog
-                                _appLoadingStatus.value = "正在解析应用名称 ($parseCount / $totalUserApps)..."
-                            }
-                        } else if (trimmed.startsWith("===APK:")) {
-                            currentApk = trimmed.substring("===APK:".length).trim()
-                        } else if (currentPkg != null) {
-                            if (trimmed.contains("application-label")) {
-                                val rawKey = trimmed.substringBefore(":").trim()
-                                val rawVal = trimmed.substringAfter("'").substringBefore("'")
-                                val label = cleanLabel(rawVal)
-                                if (label != null) {
-                                    val keyLower = rawKey.lowercase()
-                                    if (keyLower == "application-label-zh-cn" ||
-                                        keyLower == "application-label-zh-hans" ||
-                                        keyLower == "application-label-zh-sg" ||
-                                        keyLower == "application-label-zh") {
-                                        currentZhCnLabel = label
-                                    } else if (keyLower.startsWith("application-label-zh")) {
-                                        if (currentZhLabel == null) currentZhLabel = label
-                                    } else if (keyLower == "application-label" || keyLower.startsWith("application-label-en")) {
-                                        if (currentDefLabel == null) currentDefLabel = label
-                                    }
-                                }
-                            } else if (trimmed.contains("application:") && trimmed.contains("label='")) {
-                                val label = cleanLabel(trimmed.substringAfter("label='").substringBefore("'"))
-                                if (label != null && currentAppLabel == null) currentAppLabel = label
-                            }
-                        }
-                    }
-                    commitCurrentPkg()
-                    log("aapt2 解析完成：共处理 $parseCount 个第三方应用，成功提取出 ${labelMap.size} 个 Label，未提取到 Label: $failCount 个")
+                if (userAppsList.isNotEmpty()) {
+                    // Step 4: Run a standalone diagnostic sample on the 1st app
+                    val sample = userAppsList.first()
+                    log("--- [单个应用 aapt2 诊断测试] ---")
+                    val sampleCmd = "$aaptRemotePath dump badging \"${sample.apk}\""
+                    log("  [诊断 CMD] $sampleCmd")
+                    val sampleResRaw = conn.executeShell("$sampleCmd 2>&1; echo \"___EC:$?\"", 10000).trim()
+                    val sampleOut = sampleResRaw.substringBefore("___EC:").trim()
+                    val sampleEc = sampleResRaw.substringAfter("___EC:", "").trim()
+                    log("  [诊断 EC] $sampleEc")
+                    log("  [诊断原始输出前 10 行]:")
+                    sampleOut.lines().take(10).forEach { l -> log("    $l") }
+                    log("--- [单个应用诊断结束] ---")
                 }
 
-                // Step 4: Fallback / Supplement using dumpsys package if needed
-                _appLoadingStatus.value = "补充解析应用 Label..."
-                log("3. 执行 dumpsys package 补充解析 Label...")
-                val dumpsysOut = conn.executeShell("dumpsys package", 30000)
+                // Step 5: Run batch aapt2 dump badging
+                log("4. 开始使用 aapt2 dump badging 批量提取应用 Label...")
+                _appLoadingStatus.value = "正在使用 aapt2 解析应用名称 (0 / $totalUserApps)..."
+
+                val aaptScript = "pm list packages -3 -f | tr -d '\\r' | while read -r line; do " +
+                        "pkg=\"\${line##*=}\"; " +
+                        "apk=\"\${line#package:}\"; " +
+                        "apk=\"\${apk%=*}\"; " +
+                        "if [ -n \"\$pkg\" ] && [ -n \"\$apk\" ]; then " +
+                        "echo \"===PKG:\$pkg\"; " +
+                        "echo \"===APK:\$apk\"; " +
+                        "out=$($aaptRemotePath dump badging \"\$apk\" 2>&1); " +
+                        "ec=$?; " +
+                        "echo \"===EC:\$ec\"; " +
+                        "echo \"===RAW_START\"; " +
+                        "echo \"\$out\"; " +
+                        "echo \"===RAW_END\"; " +
+                        "fi; " +
+                        "done"
+
                 var currentPkg: String? = null
-                var dumpsysCount = 0
-                dumpsysOut.lineSequence().forEach { line ->
-                    val trimmed = line.trim()
-                    if (trimmed.startsWith("Package [")) {
-                        currentPkg = trimmed.substringAfter("Package [").substringBefore("]").trim()
-                    } else if (currentPkg != null && trimmed.contains("application-label")) {
-                        val label = trimmed.substringAfter("'").substringBefore("'").trim()
-                        if (label.isNotEmpty() && !label.startsWith("0x")) {
-                            if (!labelMap.containsKey(currentPkg)) {
-                                labelMap[currentPkg!!] = label
-                                dumpsysCount++
+                var currentApk: String? = null
+                var currentEc: String = "0"
+                val currentRawLines = mutableListOf<String>()
+                var isInRawBlock = false
+
+                fun cleanLabel(raw: String): String? {
+                    val t = raw.trim()
+                    if (t.isEmpty()) return null
+                    if (t.startsWith("0x") || t.startsWith("@0x") || t.startsWith("@string/") || t.startsWith("@17") || t.startsWith("@android:")) return null
+                    if (t.matches(Regex("^@?[0-9]+$"))) return null
+                    return t
+                }
+
+                var parseCount = 0
+                var failCount = 0
+
+                fun commitCurrentPkg() {
+                    val pkg = currentPkg ?: return
+                    var foundZhCnLabel: String? = null
+                    var foundZhLabel: String? = null
+                    var foundDefLabel: String? = null
+                    var foundAppLabel: String? = null
+
+                    for (rawLine in currentRawLines) {
+                        val trimmed = rawLine.trim()
+                        if (trimmed.contains("application-label")) {
+                            val rawKey = trimmed.substringBefore(":").trim()
+                            val rawVal = trimmed.substringAfter("'").substringBefore("'")
+                            val label = cleanLabel(rawVal)
+                            if (label != null) {
+                                val keyLower = rawKey.lowercase()
+                                if (keyLower == "application-label-zh-cn" ||
+                                    keyLower == "application-label-zh-hans" ||
+                                    keyLower == "application-label-zh-sg" ||
+                                    keyLower == "application-label-zh") {
+                                    foundZhCnLabel = label
+                                } else if (keyLower.startsWith("application-label-zh")) {
+                                    if (foundZhLabel == null) foundZhLabel = label
+                                } else if (keyLower == "application-label" || keyLower.startsWith("application-label-en")) {
+                                    if (foundDefLabel == null) foundDefLabel = label
+                                }
                             }
+                        } else if (trimmed.contains("application:") && trimmed.contains("label='")) {
+                            val label = cleanLabel(trimmed.substringAfter("label='").substringBefore("'"))
+                            if (label != null && foundAppLabel == null) foundAppLabel = label
                         }
                     }
-                }
-                log("dumpsys package 补充解析出 $dumpsysCount 个 Label (当前 Label 总数: ${labelMap.size})")
 
-                // Step 5: List system packages
+                    val bestLabel = foundZhCnLabel ?: foundZhLabel ?: foundDefLabel ?: foundAppLabel
+                    if (!bestLabel.isNullOrBlank()) {
+                        labelMap[pkg] = bestLabel
+                    } else {
+                        failCount++
+                        val errorSummary = if (currentRawLines.isEmpty()) {
+                            "无任何输出 (Empty)"
+                        } else {
+                            currentRawLines.take(3).joinToString(" | ")
+                        }
+                        log("aapt2 未匹配到 Label: [$pkg] (APK: ${currentApk ?: "未知"}) | EC: $currentEc | 输出: $errorSummary")
+                    }
+
+                    currentPkg = null
+                    currentApk = null
+                    currentEc = "0"
+                    currentRawLines.clear()
+                    isInRawBlock = false
+                }
+
+                conn.executeShellStream(aaptScript) { line ->
+                    val trimmed = line.trim()
+                    if (trimmed.startsWith("===PKG:")) {
+                        commitCurrentPkg()
+                        currentPkg = trimmed.substring("===PKG:".length).trim()
+                        parseCount++
+                        if (parseCount % 10 == 0 || parseCount == totalUserApps) {
+                            val prog = if (totalUserApps > 0) parseCount.toFloat() / totalUserApps else 0f
+                            _appLoadingProgress.value = prog
+                            _appLoadingStatus.value = "正在使用 aapt2 解析应用名称 ($parseCount / $totalUserApps)..."
+                        }
+                    } else if (trimmed.startsWith("===APK:")) {
+                        currentApk = trimmed.substring("===APK:".length).trim()
+                    } else if (trimmed.startsWith("===EC:")) {
+                        currentEc = trimmed.substring("===EC:".length).trim()
+                    } else if (trimmed == "===RAW_START") {
+                        isInRawBlock = true
+                        currentRawLines.clear()
+                    } else if (trimmed == "===RAW_END") {
+                        isInRawBlock = false
+                    } else if (isInRawBlock) {
+                        currentRawLines.add(line)
+                    }
+                }
+                commitCurrentPkg()
+                log("aapt2 解析完成：共处理 $parseCount 个第三方应用，成功提取出 ${labelMap.size} 个 Label，未提取到 Label: $failCount 个")
+
+                // Step 6: Assemble application list
                 _appLoadingStatus.value = "正在组装应用列表..."
-                log("4. 组装第三方应用与系统应用列表...")
+                log("5. 组装第三方应用与系统应用列表...")
                 val systemAppsOut = conn.executeShell("pm list packages -s")
 
                 val appList = mutableListOf<RemoteAppItem>()
 
-                userAppsList.forEach { pkg ->
+                userAppsList.forEach { entry ->
+                    val pkg = entry.pkg
                     val friendlyName = labelMap[pkg] ?: parseFriendlyAppName(pkg)
                     appList.add(RemoteAppItem(packageName = pkg, appName = friendlyName, isSystemApp = false))
                 }
 
                 systemAppsOut.split("\n").forEach { line ->
                     val pkg = line.replace("package:", "").trim()
-                    if (pkg.isNotEmpty() && !userAppsList.contains(pkg)) {
+                    if (pkg.isNotEmpty() && userAppsList.none { it.pkg == pkg }) {
                         val friendlyName = labelMap[pkg] ?: parseFriendlyAppName(pkg)
                         appList.add(RemoteAppItem(packageName = pkg, appName = friendlyName, isSystemApp = true))
                     }
@@ -763,6 +844,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 _installedApps.value = appList.sortedBy { it.appName.lowercase() }
                 log("=== 应用列表加载完成，共 ${appList.size} 个应用 ===")
                 _actionMessage.value = "已获取 ${appList.size} 个应用信息"
+            } catch (e: CancellationException) {
+                log("应用列表解析任务已取消")
             } catch (e: Exception) {
                 e.printStackTrace()
                 log("刷新应用列表发生异常: ${e.message}")
@@ -796,7 +879,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             conn.executeShell("pm uninstall $packageName")
             _actionMessage.value = "已卸载应用: $packageName"
-            refreshApps()
+            refreshApps(force = true)
         }
     }
 
@@ -805,6 +888,199 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             conn.executeShell("pm clear $packageName")
             _actionMessage.value = "已清除应用数据: $packageName"
+        }
+    }
+
+    // Load installed apps from LOCAL controller device
+    fun loadLocalApps(context: Context, force: Boolean = false) {
+        if (_isLocalAppsLoading.value && !force) return
+        if (!force && _localInstalledApps.value.isNotEmpty()) return
+
+        loadLocalAppsJob?.cancel()
+        loadLocalAppsJob = viewModelScope.launch(Dispatchers.IO) {
+            _isLocalAppsLoading.value = true
+            try {
+                val pm = context.packageManager
+                val packages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.getInstalledPackages(PackageManager.PackageInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    pm.getInstalledPackages(0)
+                }
+
+                val list = mutableListOf<LocalAppItem>()
+                for (pkgInfo in packages) {
+                    val appInfo = pkgInfo.applicationInfo ?: continue
+                    val sourceDir = appInfo.sourceDir ?: continue
+                    if (sourceDir.isBlank()) continue
+
+                    val baseFile = File(sourceDir)
+                    if (!baseFile.exists()) continue
+
+                    val splits = appInfo.splitSourceDirs?.filter { File(it).exists() } ?: emptyList()
+                    var totalSize = baseFile.length()
+                    for (s in splits) {
+                        totalSize += File(s).length()
+                    }
+
+                    val isSys = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                    val appName = try {
+                        appInfo.loadLabel(pm).toString()
+                    } catch (_: Exception) {
+                        pkgInfo.packageName
+                    }
+                    val icon = try {
+                        appInfo.loadIcon(pm)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val vCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        pkgInfo.longVersionCode
+                    } else {
+                        @Suppress("DEPRECATION")
+                        pkgInfo.versionCode.toLong()
+                    }
+
+                    list.add(
+                        LocalAppItem(
+                            packageName = pkgInfo.packageName,
+                            appName = appName,
+                            versionName = pkgInfo.versionName ?: "",
+                            versionCode = vCode,
+                            icon = icon,
+                            sourceDir = sourceDir,
+                            splitSourceDirs = splits,
+                            totalSizeBytes = totalSize,
+                            isSystemApp = isSys,
+                            isSingleApk = splits.isEmpty()
+                        )
+                    )
+                }
+
+                _localInstalledApps.value = list.sortedWith(
+                    compareBy<LocalAppItem> { it.isSystemApp }
+                        .thenBy { it.appName.lowercase() }
+                )
+            } catch (e: CancellationException) {
+                // Ignore
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _actionMessage.value = "获取本机已安装应用失败: ${e.message}"
+            } finally {
+                _isLocalAppsLoading.value = false
+            }
+        }
+    }
+
+    // Install an app extracted from the LOCAL controller device to the REMOTE target device
+    fun installLocalAppToRemote(localApp: LocalAppItem) {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            if (localApp.isSingleApk) {
+                _actionMessage.value = "准备提取 ${localApp.appName} 单 APK 并安装..."
+                try {
+                    val sourceFile = File(localApp.sourceDir)
+                    if (!sourceFile.exists()) {
+                        _actionMessage.value = "未找到本机 APK 源文件 (${localApp.sourceDir})"
+                        return@launch
+                    }
+
+                    val tempRemotePath = "/data/local/tmp/extracted_${System.currentTimeMillis()}.apk"
+                    conn.executeShell("rm -f $tempRemotePath")
+
+                    val syncClient = AdbSyncClient(conn)
+                    val totalMb = String.format("%.1f", localApp.totalSizeBytes / (1024.0 * 1024.0))
+                    sourceFile.inputStream().use { stream ->
+                        syncClient.pushFile(stream, tempRemotePath) { sent ->
+                            val sentMb = String.format("%.1f", sent / (1024.0 * 1024.0))
+                            _actionMessage.value = "正在传输 ${localApp.appName} ($sentMb / $totalMb MB)..."
+                        }
+                    }
+
+                    _actionMessage.value = "传输完成，正在对端执行安装 (pm install -r -t)..."
+                    conn.executeShell("chmod 666 $tempRemotePath")
+                    var installResult = conn.executeShell("pm install -r -t $tempRemotePath")
+
+                    if (!installResult.contains("Success") && _isRootMode.value) {
+                        _actionMessage.value = "普通安装未成功，尝试 Root 权限安装..."
+                        installResult = conn.executeShell("su -c \"pm install -r -t $tempRemotePath\"")
+                    }
+
+                    conn.executeShell("rm -f $tempRemotePath")
+
+                    val trimmedRes = installResult.trim()
+                    if (trimmedRes.contains("Success")) {
+                        _actionMessage.value = "${localApp.appName} 远程安装成功!"
+                        refreshApps(force = true)
+                    } else {
+                        val detailErr = if (trimmedRes.isEmpty()) {
+                            "包管理器未返回输出。请检查对端设备设置中是否已开启『USB 安装/ADB 静默安装权限』"
+                        } else trimmedRes
+                        _actionMessage.value = "安装失败: $detailErr"
+                    }
+                } catch (e: Exception) {
+                    _actionMessage.value = "提取安装异常: ${e.message}"
+                }
+            } else {
+                // Split APKs (组合包) flow
+                _actionMessage.value = "准备提取 ${localApp.appName} 组合包 (包含 ${localApp.splitSourceDirs.size + 1} 个分片)..."
+                try {
+                    val remoteDir = "/data/local/tmp/splits_${System.currentTimeMillis()}"
+                    conn.executeShell("rm -rf $remoteDir && mkdir -p $remoteDir")
+
+                    val allFiles = mutableListOf<File>()
+                    val baseFile = File(localApp.sourceDir)
+                    if (baseFile.exists()) allFiles.add(baseFile)
+                    for (s in localApp.splitSourceDirs) {
+                        val sf = File(s)
+                        if (sf.exists()) allFiles.add(sf)
+                    }
+
+                    val syncClient = AdbSyncClient(conn)
+                    val remotePaths = mutableListOf<String>()
+                    var totalSent = 0L
+                    val totalBytes = allFiles.sumOf { it.length() }
+                    val totalMb = String.format("%.1f", totalBytes / (1024.0 * 1024.0))
+
+                    for ((idx, file) in allFiles.withIndex()) {
+                        val remotePath = "$remoteDir/split_$idx.apk"
+                        remotePaths.add(remotePath)
+                        file.inputStream().use { stream ->
+                            syncClient.pushFile(stream, remotePath) { sentInFile ->
+                                val currentOverallSent = totalSent + sentInFile
+                                val sentMb = String.format("%.1f", currentOverallSent / (1024.0 * 1024.0))
+                                _actionMessage.value = "传输分片 [${idx + 1}/${allFiles.size}] ($sentMb / $totalMb MB)..."
+                            }
+                        }
+                        totalSent += file.length()
+                    }
+
+                    _actionMessage.value = "分片传输完成，正在对端安装组合包..."
+                    conn.executeShell("chmod 777 $remoteDir && chmod 666 $remoteDir/*.apk")
+                    val cmd = "pm install -r -t " + remotePaths.joinToString(" ")
+                    var installResult = conn.executeShell(cmd)
+
+                    if (!installResult.contains("Success") && _isRootMode.value) {
+                        _actionMessage.value = "普通安装未成功，尝试 Root 权限安装组合包..."
+                        installResult = conn.executeShell("su -c \"$cmd\"")
+                    }
+
+                    conn.executeShell("rm -rf $remoteDir")
+
+                    val trimmedRes = installResult.trim()
+                    if (trimmedRes.contains("Success")) {
+                        _actionMessage.value = "${localApp.appName} (组合包) 远程安装成功!"
+                        refreshApps(force = true)
+                    } else {
+                        val reason = if (trimmedRes.contains("NO_MATCHING_ABIS") || trimmedRes.contains("INSTALL_FAILED_INVALID_APK")) {
+                            "\n(提示: 组合包包含控制端特定 CPU 架构或屏幕密度分片，对端可能不兼容，建议使用单 APK 或完整离线包)"
+                        } else ""
+                        _actionMessage.value = "组合包安装失败: $trimmedRes $reason"
+                    }
+                } catch (e: Exception) {
+                    _actionMessage.value = "组合包安装异常: ${e.message}"
+                }
+            }
         }
     }
 
@@ -848,7 +1124,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 val trimmedRes = installResult.trim()
                 if (trimmedRes.contains("Success")) {
                     _actionMessage.value = "应用 $fileName 远程安装成功!"
-                    refreshApps()
+                    refreshApps(force = true)
                 } else {
                     val detailErr = if (trimmedRes.isEmpty()) {
                         "包管理器未返回输出。请检查设备设置中是否已开启『USB 安装/ADB 静默安装权限』"
@@ -864,9 +1140,16 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // Process Manager
-    fun refreshProcesses() {
+    fun refreshProcesses(force: Boolean = false) {
         val conn = activeConnection ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        if (refreshProcessesJob?.isActive == true) {
+            if (force) {
+                refreshProcessesJob?.cancel()
+            } else {
+                return
+            }
+        }
+        refreshProcessesJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val psOutput = conn.executeShell("ps -ef")
                 val list = mutableListOf<RemoteProcessItem>()
@@ -895,6 +1178,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 _runningProcesses.value = list.take(100)
+            } catch (e: CancellationException) {
+                // Ignore
             } catch (e: Exception) {
                 e.printStackTrace()
             }
