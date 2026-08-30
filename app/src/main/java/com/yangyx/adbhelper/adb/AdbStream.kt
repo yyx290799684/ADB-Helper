@@ -59,7 +59,7 @@ class AdbStream(
     fun write(data: ByteArray) {
         if (isClosed) throw IllegalStateException("Stream $localId is closed")
         
-        val maxChunkSize = 16384
+        val maxChunkSize = connection.maxPayloadSize.coerceAtLeast(16384)
         var offset = 0
         while (offset < data.size) {
             if (isClosed) throw IllegalStateException("Stream $localId was closed during write")
@@ -68,7 +68,7 @@ class AdbStream(
 
             synchronized(writeAckLock) {
                 connection.writeStream(this, chunk)
-                writeAckLock.wait(10000)
+                writeAckLock.wait(15000)
             }
             if (isClosed) {
                 throw IllegalStateException("Stream $localId was closed by remote peer while sending data")

@@ -12,12 +12,36 @@ class AdbRepository(
 ) {
     val allDevices: Flow<List<DeviceEntity>> = deviceDao.getAllDevices()
 
+    suspend fun getAllDevicesDirect(): List<DeviceEntity> {
+        return deviceDao.getAllDevicesDirect()
+    }
+
+    suspend fun getDeviceByIpAndPort(ip: String, port: Int): DeviceEntity? {
+        return deviceDao.getDeviceByIpAndPort(ip, port)
+    }
+
     suspend fun saveDevice(device: DeviceEntity) {
         deviceDao.insertOrUpdateDevice(device)
     }
 
+    suspend fun updateDevices(devices: List<DeviceEntity>) {
+        deviceDao.updateDevices(devices)
+    }
+
     suspend fun deleteDevice(ip: String) {
         deviceDao.deleteDeviceByIp(ip)
+    }
+
+    suspend fun deleteDeviceById(id: Long) {
+        deviceDao.deleteDeviceById(id)
+    }
+
+    suspend fun deleteDeviceByIpAndPort(ip: String, port: Int) {
+        deviceDao.deleteDeviceByIpAndPort(ip, port)
+    }
+
+    suspend fun deleteDevicesBySerialNo(serialNo: String) {
+        deviceDao.deleteDevicesBySerialNo(serialNo)
     }
 
     fun getCommandHistory(ip: String): Flow<List<CommandEntity>> {

@@ -75,9 +75,13 @@ data class AdbMessage(
         bb.putInt(command xor -0x1)
 
         synchronized(output) {
-            output.write(bb.array())
             if (payload.isNotEmpty()) {
-                output.write(payload)
+                val totalPacket = ByteArray(24 + payload.size)
+                System.arraycopy(bb.array(), 0, totalPacket, 0, 24)
+                System.arraycopy(payload, 0, totalPacket, 24, payload.size)
+                output.write(totalPacket)
+            } else {
+                output.write(bb.array())
             }
             output.flush()
         }

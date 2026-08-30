@@ -37,6 +37,9 @@ class AdbConnection(
     var deviceBanner: String = ""
         private set
 
+    var maxPayloadSize: Int = 262144
+        private set
+
     private val writeLock = Any()
     private val localIdCounter = AtomicInteger(1)
     private val streams = ConcurrentHashMap<Int, AdbStream>()
@@ -57,20 +60,20 @@ class AdbConnection(
             s.connect(java.net.InetSocketAddress(ip, port), timeoutMs)
             s.tcpNoDelay = true
             s.keepAlive = true
-            s.receiveBufferSize = 2 * 1024 * 1024 // 2MB receive buffer for high bitrate streaming
-            s.sendBufferSize = 512 * 1024
+            s.receiveBufferSize = 8 * 1024 * 1024 // 8MB receive buffer for high bitrate streaming and sync
+            s.sendBufferSize = 8 * 1024 * 1024    // 8MB send buffer for high throughput file transfer
             s.soTimeout = 10000
             this.socket = s
-            this.input = s.getInputStream()
-            this.output = s.getOutputStream()
+            this.input = java.io.BufferedInputStream(s.getInputStream(), 524288)
+            this.output = java.io.BufferedOutputStream(s.getOutputStream(), 524288)
         }
 
 
         val crypto = AdbCrypto.getOrCreate(context)
 
-        // Send CNXN with maxdata = 262144 (256KB) for high-throughput streaming
+        // Send CNXN with maxdata = 1048576 (1MB) for maximum throughput
         val cnxnPayload = "host::ADB_Helper_Client\u0000".toByteArray(Charsets.UTF_8)
-        val msgCnxn = AdbMessage(AdbMessage.CMD_CNXN, 0x01000000, 262144, cnxnPayload)
+        val msgCnxn = AdbMessage(AdbMessage.CMD_CNXN, 0x01000000, 1048576, cnxnPayload)
         safeWriteMessage(msgCnxn)
 
         var authenticated = false
@@ -90,6 +93,10 @@ class AdbConnection(
             when (response.command) {
                 AdbMessage.CMD_CNXN -> {
                     deviceBanner = String(response.payload, Charsets.UTF_8)
+                    val devMaxData = response.arg1
+                    if (devMaxData in 4096..1048576) {
+                        maxPayloadSize = devMaxData
+                    }
                     authenticated = true
                     isConnected = true
                 }
@@ -194,8 +201,30 @@ class AdbConnection(
         safeWriteMessage(msg)
     }
 
+    @Synchronized
+    fun ensureConnected(timeoutMs: Int = 5000): Boolean {
+        if (isConnected && socket?.isConnected == true && socket?.isClosed == false) {
+            return true
+        }
+        if (isUsb) return false
+        if (ip.isBlank() || port <= 0) return false
+
+        return try {
+            disconnect()
+            connect(timeoutMs)
+            isConnected
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun openStream(destination: String): AdbStream {
-        if (!isConnected) throw IllegalStateException("ADB connection is not active")
+        if (!isConnected || socket?.isClosed == true) {
+            val reconnected = ensureConnected(5000)
+            if (!reconnected) {
+                throw IllegalStateException("ADB connection is not active")
+            }
+        }
 
         val localId = localIdCounter.getAndIncrement()
         val stream = AdbStream(localId, this)
@@ -257,6 +286,28 @@ class AdbConnection(
             e.printStackTrace()
         } finally {
             stream.close()
+        }
+    }
+
+    fun reboot(mode: String = "") {
+        val modeLower = mode.trim().lowercase()
+        try {
+            val dest = if (modeLower.isBlank()) "reboot:" else "reboot:$modeLower"
+            val stream = openStream(dest)
+            try {
+                stream.close()
+            } catch (_: Exception) {}
+        } catch (_: Exception) {
+            val shellCmd = when (modeLower) {
+                "fastboot" -> "reboot fastboot 2>/dev/null || reboot bootloader 2>/dev/null || setprop sys.powerctl reboot,fastboot"
+                "bootloader" -> "reboot bootloader 2>/dev/null || setprop sys.powerctl reboot,bootloader"
+                "recovery" -> "reboot recovery 2>/dev/null || setprop sys.powerctl reboot,recovery"
+                "poweroff", "shutdown" -> "reboot -p 2>/dev/null || svc power shutdown 2>/dev/null || setprop sys.powerctl shutdown"
+                else -> "svc power reboot 2>/dev/null || reboot 2>/dev/null || setprop sys.powerctl reboot"
+            }
+            try {
+                executeShell(shellCmd, 3000)
+            } catch (_: Exception) {}
         }
     }
 

@@ -56,7 +56,32 @@ class ScrcpyController(
     var activeSurface: Surface? = null
         private set
     private var currentDecoder: H264StreamDecoder? = null
-    private var controlStream: AdbStream? = null
+    var controlStream: AdbStream? = null
+        private set
+
+    val multiTouchController: com.yangyx.adbhelper.touch.MultiTouchController = com.yangyx.adbhelper.touch.MultiTouchController(
+        coroutineScope = scope,
+        sendRawBytes = { bytes ->
+            val stream = controlStream
+            if (stream != null && !stream.isClosed) {
+                try {
+                    stream.write(bytes)
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+            } else {
+                false
+            }
+        },
+        executeShellFallback = { cmd ->
+            try {
+                connection.executeShell(cmd)
+            } catch (_: Exception) {
+                ""
+            }
+        }
+    )
 
     fun setSurface(surface: Surface?) {
         activeSurface = surface
@@ -192,6 +217,7 @@ class ScrcpyController(
     val logs: StateFlow<List<ScrcpyLog>> = _logs.asStateFlow()
 
     private var streamingJob: Job? = null
+    private var isExplicitlyStopped = false
     private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
 
     @Volatile
@@ -324,6 +350,7 @@ class ScrcpyController(
 
     fun startMirroring() {
         if (streamingJob?.isActive == true) return
+        isExplicitlyStopped = false
         _screenState.value = ScreenState.Connecting
         val cfg = _config.value
         val isCamera = cfg.videoSource.equals("camera", ignoreCase = true)
@@ -620,18 +647,28 @@ class ScrcpyController(
                     }
                 }
 
-                try {
-                    val ctrl = connection.openStream("localabstract:scrcpy")
-                    controlStream = ctrl
-                    addLog("成功连接 scrcpy-server 控制 Socket!", LogLevel.SUCCESS)
-                    if (cfg.isScreenOff && !isCamera) {
-                        try {
-                            ctrl.write(byteArrayOf(10, 0)) // 10 = SET_SCREEN_POWER_MODE, 0 = POWER_MODE_OFF
-                            addLog("已通过控制通道发送熄屏指令 (SET_SCREEN_POWER_MODE=0)", LogLevel.INFO)
-                        } catch (_: Exception) {}
+                addLog("正在尝试连接 scrcpy 控制通道 (localabstract:scrcpy)...", LogLevel.INFO)
+                for (attempt in 1..25) {
+                    if (streamingJob?.isActive != true) break
+                    try {
+                        val ctrl = connection.openStream("localabstract:scrcpy")
+                        controlStream = ctrl
+                        multiTouchController.ensureWorkerActive()
+                        addLog("成功连接 scrcpy-server 控制 Socket! (尝试第 $attempt 次)", LogLevel.SUCCESS)
+                        if (cfg.isScreenOff && !isCamera) {
+                            try {
+                                ctrl.write(byteArrayOf(10, 0)) // 10 = SET_SCREEN_POWER_MODE, 0 = POWER_MODE_OFF
+                                addLog("已通过控制通道发送熄屏指令 (SET_SCREEN_POWER_MODE=0)", LogLevel.INFO)
+                            } catch (_: Exception) {}
+                        }
+                        break
+                    } catch (e: Exception) {
+                        if (attempt == 25) {
+                            addLog("连接 scrcpy 控制 Socket 最终失败: ${e.message}", LogLevel.ERROR)
+                        } else {
+                            kotlinx.coroutines.delay(200)
+                        }
                     }
-                } catch (e: Exception) {
-                    addLog("连接 scrcpy 控制 Socket 异常: ${e.message}", LogLevel.WARN)
                 }
 
                 val stream = videoStream
@@ -679,12 +716,13 @@ class ScrcpyController(
                               (codecHeaderBuf[3].toInt() and 0xFF)
 
                 val codecFourCC = String(codecHeaderBuf, 0, 4, Charsets.US_ASCII)
+                val codecClean = codecFourCC.replace("\u0000", "").trim()
                 val codecHex = String.format("%08X", codecId)
-                addLog("视频元数据解析成功: Codec=$codecFourCC (0x$codecHex)", LogLevel.SUCCESS)
+                addLog("视频元数据解析成功: Codec='$codecClean' (0x$codecHex)", LogLevel.SUCCESS)
 
                 val mimeType = when {
-                    codecFourCC.contains("h265", ignoreCase = true) || codecFourCC.contains("hevc", ignoreCase = true) -> MediaFormat.MIMETYPE_VIDEO_HEVC
-                    codecFourCC.contains("av01", ignoreCase = true) || codecFourCC.contains("av1", ignoreCase = true) -> "video/av01"
+                    codecClean.contains("h265", ignoreCase = true) || codecClean.contains("hevc", ignoreCase = true) -> MediaFormat.MIMETYPE_VIDEO_HEVC
+                    codecClean.contains("av01", ignoreCase = true) || codecClean.contains("av1", ignoreCase = true) -> "video/av01"
                     else -> MediaFormat.MIMETYPE_VIDEO_AVC
                 }
 
@@ -694,9 +732,12 @@ class ScrcpyController(
                 remoteWidth = actualW
                 remoteHeight = actualH
 
+                val displayW = if (cfg.maxResolution == 0 && nativeWidth > 0 && !isCamera) nativeWidth else actualW
+                val displayH = if (cfg.maxResolution == 0 && nativeHeight > 0 && !isCamera) nativeHeight else actualH
+
                 _screenState.value = ScreenState.Streaming(
-                    width = actualW,
-                    height = actualH,
+                    width = displayW,
+                    height = displayH,
                     fps = 0f,
                     latencyMs = 12L
                 )
@@ -734,9 +775,11 @@ class ScrcpyController(
                             addLog("检测到视频流动态分辨率变更: ${fixedW}x${fixedH}", LogLevel.INFO)
                             remoteWidth = fixedW
                             remoteHeight = fixedH
+                            val curDisplayW = if (cfg.maxResolution == 0 && nativeWidth > 0 && !isCamera) nativeWidth else fixedW
+                            val curDisplayH = if (cfg.maxResolution == 0 && nativeHeight > 0 && !isCamera) nativeHeight else fixedH
                             _screenState.value = ScreenState.Streaming(
-                                width = fixedW,
-                                height = fixedH,
+                                width = curDisplayW,
+                                height = curDisplayH,
                                 fps = currentFps,
                                 latencyMs = 12L
                             )
@@ -752,9 +795,12 @@ class ScrcpyController(
                             lastFpsTime = now
                         }
 
+                        val curDisplayW = if (cfg.maxResolution == 0 && nativeWidth > 0 && !isCamera) nativeWidth else remoteWidth
+                        val curDisplayH = if (cfg.maxResolution == 0 && nativeHeight > 0 && !isCamera) nativeHeight else remoteHeight
+
                         _screenState.value = ScreenState.Streaming(
-                            width = remoteWidth,
-                            height = remoteHeight,
+                            width = curDisplayW,
+                            height = curDisplayH,
                             fps = currentFps,
                             latencyMs = 12L
                         )
@@ -836,17 +882,25 @@ class ScrcpyController(
                         }
                     }
                 } catch (e: Exception) {
-                    addLog("视频传输中断: ${e.message}", LogLevel.WARN)
+                    if (!isExplicitlyStopped) {
+                        addLog("视频传输中断: ${e.message}", LogLevel.WARN)
+                    }
                 } finally {
                     currentDecoder = null
-                    decoder.stop()
+                    try { decoder.stop() } catch (_: Exception) {}
                     try { videoStream.close() } catch (_: Exception) {}
                     try { audioStream?.close() } catch (_: Exception) {}
                     try { serverProcessStream?.close() } catch (_: Exception) {}
                 }
-            } catch (e: Exception) {
-                addLog("投屏启动出现严重错误: ${e.message}", LogLevel.ERROR)
-                _screenState.value = ScreenState.Error(e.message ?: "Screen mirroring failed")
+            } catch (e: Throwable) {
+                if (!isExplicitlyStopped && e !is kotlinx.coroutines.CancellationException) {
+                    addLog("投屏启动出现严重错误: ${e.message}", LogLevel.ERROR)
+                    _screenState.value = ScreenState.Error(e.message ?: "Screen mirroring failed")
+                }
+            } finally {
+                if (isExplicitlyStopped || _screenState.value !is ScreenState.Error) {
+                    _screenState.value = ScreenState.Idle
+                }
             }
         }
     }
@@ -905,10 +959,10 @@ class ScrcpyController(
         try {
             addLog("正在查询被控端原生物理屏幕分辨率...", LogLevel.INFO)
             val output = connection.executeShell("wm size")
-            val regex = Regex("(\\d+)x(\\d+)")
-            val match = regex.find(output)
-            if (match != null) {
-                val (w, h) = match.destructured
+            val regex = Regex("(\\d+)[xX](\\d+)")
+            val matches = regex.findAll(output).toList()
+            if (matches.isNotEmpty()) {
+                val (w, h) = matches.last().destructured
                 nativeWidth = w.toInt()
                 nativeHeight = h.toInt()
                 remoteWidth = nativeWidth
@@ -1024,6 +1078,7 @@ class ScrcpyController(
     }
 
     fun stopMirroring() {
+        isExplicitlyStopped = true
         addLog("停止屏幕投屏...", LogLevel.INFO)
         val wasScreenOff = _config.value.isScreenOff
         val stream = controlStream
@@ -1059,31 +1114,89 @@ class ScrcpyController(
         }
     }
 
-    fun sendTap(x: Int, y: Int) {
-        scope.launch(Dispatchers.IO) {
-            try {
-                val realX: Int
-                val realY: Int
-                if (remoteWidth > 0 && remoteHeight > 0 && nativeWidth > 0 && nativeHeight > 0) {
-                    realX = ((x.toFloat() / remoteWidth.toFloat()) * nativeWidth).toInt().coerceIn(0, nativeWidth - 1)
-                    realY = ((y.toFloat() / remoteHeight.toFloat()) * nativeHeight).toInt().coerceIn(0, nativeHeight - 1)
-                } else {
-                    realX = x
-                    realY = y
-                }
-                val displayArg = if (virtualDisplayId > 0) " -d $virtualDisplayId" else ""
-                connection.executeShell("input$displayArg tap $realX $realY")
-            } catch (e: Exception) {
-                e.printStackTrace()
+    fun injectTouchEvent(
+        action: Int,
+        pointerId: Long,
+        x: Int,
+        y: Int,
+        screenWidth: Int,
+        screenHeight: Int,
+        pressure: Float = 1.0f,
+        actionButton: Int = 0,
+        buttons: Int = 0
+    ) {
+        val stream = controlStream
+        if (stream != null && !stream.isClosed) {
+            val buffer = ByteArray(32)
+            buffer[0] = 2 // TYPE_INJECT_TOUCH_EVENT
+
+            // 1. Action (1 byte)
+            buffer[1] = (action and 0xFF).toByte()
+
+            // 2. PointerId (8 bytes, uint64_t big-endian)
+            for (i in 0..7) {
+                buffer[2 + i] = ((pointerId ushr ((7 - i) * 8)) and 0xFFL).toByte()
             }
+
+            // 3. Position.x (4 bytes, int32 big-endian)
+            buffer[10] = ((x ushr 24) and 0xFF).toByte()
+            buffer[11] = ((x ushr 16) and 0xFF).toByte()
+            buffer[12] = ((x ushr 8) and 0xFF).toByte()
+            buffer[13] = (x and 0xFF).toByte()
+
+            // 4. Position.y (4 bytes, int32 big-endian)
+            buffer[14] = ((y ushr 24) and 0xFF).toByte()
+            buffer[15] = ((y ushr 16) and 0xFF).toByte()
+            buffer[16] = ((y ushr 8) and 0xFF).toByte()
+            buffer[17] = (y and 0xFF).toByte()
+
+            // 5. Screen Width (2 bytes, uint16 big-endian)
+            buffer[18] = ((screenWidth ushr 8) and 0xFF).toByte()
+            buffer[19] = (screenWidth and 0xFF).toByte()
+
+            // 6. Screen Height (2 bytes, uint16 big-endian)
+            buffer[20] = ((screenHeight ushr 8) and 0xFF).toByte()
+            buffer[21] = (screenHeight and 0xFF).toByte()
+
+            // 7. Pressure (2 bytes, fixed-point u16fp)
+            val pressureU16 = if (pressure <= 0f) 0 else if (pressure >= 1f) 0xFFFF else (pressure * 0xFFFF).toInt()
+            buffer[22] = ((pressureU16 ushr 8) and 0xFF).toByte()
+            buffer[23] = (pressureU16 and 0xFF).toByte()
+
+            // 8. Action button (4 bytes, uint32 big-endian)
+            buffer[24] = ((actionButton ushr 24) and 0xFF).toByte()
+            buffer[25] = ((actionButton ushr 16) and 0xFF).toByte()
+            buffer[26] = ((actionButton ushr 8) and 0xFF).toByte()
+            buffer[27] = (actionButton and 0xFF).toByte()
+
+            // 9. Buttons (4 bytes, uint32 big-endian)
+            buffer[28] = ((buttons ushr 24) and 0xFF).toByte()
+            buffer[29] = ((buttons ushr 16) and 0xFF).toByte()
+            buffer[30] = ((buttons ushr 8) and 0xFF).toByte()
+            buffer[31] = (buttons and 0xFF).toByte()
+
+            try {
+                stream.write(buffer)
+            } catch (_: Exception) {
+                // Fallback if writing failed
+                sendFallbackTouchEvent(action, x, y)
+            }
+        } else {
+            sendFallbackTouchEvent(action, x, y)
         }
     }
 
-    private var touchStream: AdbStream? = null
-
-    fun sendTouchEvent(action: String, x: Int, y: Int) {
+    private fun sendFallbackTouchEvent(action: Int, x: Int, y: Int) {
         scope.launch(Dispatchers.IO) {
             try {
+                val actionStr = when (action) {
+                    0 -> "DOWN"
+                    1 -> "UP"
+                    2 -> "MOVE"
+                    5 -> "DOWN"
+                    6 -> "UP"
+                    else -> "MOVE"
+                }
                 val realX = if (remoteWidth > 0 && remoteHeight > 0 && nativeWidth > 0 && nativeHeight > 0) {
                     ((x.toFloat() / remoteWidth.toFloat()) * nativeWidth).toInt().coerceIn(0, nativeWidth - 1)
                 } else x
@@ -1092,29 +1205,77 @@ class ScrcpyController(
                 } else y
 
                 val displayArg = if (virtualDisplayId > 0) " -d $virtualDisplayId" else ""
-                val cmd = "input$displayArg motionevent $action $realX $realY\n"
-
-                var stream = touchStream
-                if (stream == null || stream.isClosed) {
-                    try {
-                        stream = connection.openStream("shell:")
-                        touchStream = stream
-                    } catch (_: Exception) {}
-                }
-
-                if (stream != null && !stream.isClosed) {
-                    stream.write(cmd.toByteArray(Charsets.UTF_8))
-                } else {
-                    connection.executeShell("input$displayArg motionevent $action $realX $realY")
-                }
+                connection.executeShell("input$displayArg motionevent $actionStr $realX $realY")
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
+    fun sendTap(x: Int, y: Int) {
+        val stream = controlStream
+        val isAv1 = _config.value.videoCodec.equals("av1", ignoreCase = true) || _config.value.videoCodec.equals("av01", ignoreCase = true)
+        val touchW = if (isAv1) remoteWidth else (if (nativeWidth > 0) nativeWidth else remoteWidth)
+        val touchH = if (isAv1) remoteHeight else (if (nativeHeight > 0) nativeHeight else remoteHeight)
+        if (stream != null && !stream.isClosed) {
+            val rx = x.coerceIn(0, (touchW - 1).coerceAtLeast(0))
+            val ry = y.coerceIn(0, (touchH - 1).coerceAtLeast(0))
+            injectTouchEvent(0, 0L, rx, ry, touchW, touchH, 1.0f)
+            scope.launch(Dispatchers.IO) {
+                kotlinx.coroutines.delay(20)
+                injectTouchEvent(1, 0L, rx, ry, touchW, touchH, 0.0f)
+            }
+        } else {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val realX = if (remoteWidth > 0 && remoteHeight > 0 && nativeWidth > 0 && nativeHeight > 0) {
+                        ((x.toFloat() / remoteWidth.toFloat()) * nativeWidth).toInt().coerceIn(0, nativeWidth - 1)
+                    } else x
+                    val realY = if (remoteHeight > 0 && nativeHeight > 0 && remoteWidth > 0 && nativeWidth > 0) {
+                        ((y.toFloat() / remoteHeight.toFloat()) * nativeHeight).toInt().coerceIn(0, nativeHeight - 1)
+                    } else y
+                    val displayArg = if (virtualDisplayId > 0) " -d $virtualDisplayId" else ""
+                    connection.executeShell("input$displayArg tap $realX $realY")
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun sendTouchEvent(action: String, x: Int, y: Int) {
+        val actionInt = when (action.uppercase()) {
+            "DOWN" -> 0
+            "UP" -> 1
+            "MOVE" -> 2
+            else -> 2
+        }
+        injectTouchEvent(
+            action = actionInt,
+            pointerId = 0L,
+            x = x,
+            y = y,
+            screenWidth = remoteWidth,
+            screenHeight = remoteHeight,
+            pressure = if (actionInt == 1) 0.0f else 1.0f
+        )
+    }
+
     fun sendTouchPath(path: List<Pair<Int, Int>>) {
         if (path.isEmpty()) return
+        val stream = controlStream
+        if (stream != null && !stream.isClosed) {
+            val (firstX, firstY) = path.first()
+            injectTouchEvent(0, 0L, firstX, firstY, remoteWidth, remoteHeight, 1.0f)
+            for (i in 1 until path.size - 1) {
+                val (px, py) = path[i]
+                injectTouchEvent(2, 0L, px, py, remoteWidth, remoteHeight, 1.0f)
+            }
+            val (lastX, lastY) = path.last()
+            injectTouchEvent(1, 0L, lastX, lastY, remoteWidth, remoteHeight, 0.0f)
+            return
+        }
+
         scope.launch(Dispatchers.IO) {
             try {
                 val nativePath = path.map { (x, y) ->
@@ -1135,8 +1296,6 @@ class ScrcpyController(
                 }
 
                 val displayArg = if (virtualDisplayId > 0) " -d $virtualDisplayId" else ""
-
-                // Subsample path if very long to prevent exceeding shell argument limits
                 val maxPoints = 50
                 val sampled = if (nativePath.size > maxPoints) {
                     val step = nativePath.size.toFloat() / maxPoints.toFloat()
@@ -1160,17 +1319,7 @@ class ScrcpyController(
                 }
                 sb.append("input$displayArg motionevent UP ${sampled.last().first} ${sampled.last().second}")
 
-                val output = connection.executeShell(sb.toString())
-                if (output.contains("invalid") || output.contains("Unknown command") || output.contains("Error")) {
-                    // Fallback to chained swipe segments if motionevent command is not supported on target OS
-                    val fallbackSb = StringBuilder()
-                    for (i in 0 until sampled.size - 1) {
-                        val p1 = sampled[i]
-                        val p2 = sampled[i + 1]
-                        fallbackSb.append("input$displayArg swipe ${p1.first} ${p1.second} ${p2.first} ${p2.second} 15; ")
-                    }
-                    connection.executeShell(fallbackSb.toString())
-                }
+                connection.executeShell(sb.toString())
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -1178,23 +1327,37 @@ class ScrcpyController(
     }
 
     fun sendSwipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Int = 200) {
+        val stream = controlStream
+        if (stream != null && !stream.isClosed) {
+            scope.launch(Dispatchers.IO) {
+                val steps = (durationMs / 10).coerceIn(5, 30)
+                val interval = (durationMs / steps).toLong()
+                injectTouchEvent(0, 0L, startX, startY, remoteWidth, remoteHeight, 1.0f)
+                for (i in 1..steps) {
+                    val curX = startX + ((endX - startX) * i / steps)
+                    val curY = startY + ((endY - startY) * i / steps)
+                    kotlinx.coroutines.delay(interval)
+                    injectTouchEvent(2, 0L, curX, curY, remoteWidth, remoteHeight, 1.0f)
+                }
+                injectTouchEvent(1, 0L, endX, endY, remoteWidth, remoteHeight, 0.0f)
+            }
+            return
+        }
+
         scope.launch(Dispatchers.IO) {
             try {
-                val realStartX: Int
-                val realStartY: Int
-                val realEndX: Int
-                val realEndY: Int
-                if (remoteWidth > 0 && remoteHeight > 0 && nativeWidth > 0 && nativeHeight > 0) {
-                    realStartX = ((startX.toFloat() / remoteWidth.toFloat()) * nativeWidth).toInt().coerceIn(0, nativeWidth - 1)
-                    realStartY = ((startY.toFloat() / remoteHeight.toFloat()) * nativeHeight).toInt().coerceIn(0, nativeHeight - 1)
-                    realEndX = ((endX.toFloat() / remoteWidth.toFloat()) * nativeWidth).toInt().coerceIn(0, nativeWidth - 1)
-                    realEndY = ((endY.toFloat() / remoteHeight.toFloat()) * nativeHeight).toInt().coerceIn(0, nativeHeight - 1)
-                } else {
-                    realStartX = startX
-                    realStartY = startY
-                    realEndX = endX
-                    realEndY = endY
-                }
+                val realStartX = if (remoteWidth > 0 && remoteHeight > 0 && nativeWidth > 0 && nativeHeight > 0) {
+                    ((startX.toFloat() / remoteWidth.toFloat()) * nativeWidth).toInt().coerceIn(0, nativeWidth - 1)
+                } else startX
+                val realStartY = if (remoteHeight > 0 && nativeHeight > 0 && remoteWidth > 0 && nativeWidth > 0) {
+                    ((startY.toFloat() / remoteHeight.toFloat()) * nativeHeight).toInt().coerceIn(0, nativeHeight - 1)
+                } else startY
+                val realEndX = if (remoteWidth > 0 && remoteHeight > 0 && nativeWidth > 0 && nativeHeight > 0) {
+                    ((endX.toFloat() / remoteWidth.toFloat()) * nativeWidth).toInt().coerceIn(0, nativeWidth - 1)
+                } else endX
+                val realEndY = if (remoteHeight > 0 && nativeHeight > 0 && remoteWidth > 0 && nativeWidth > 0) {
+                    ((endY.toFloat() / remoteHeight.toFloat()) * nativeHeight).toInt().coerceIn(0, nativeHeight - 1)
+                } else endY
                 val displayArg = if (virtualDisplayId > 0) " -d $virtualDisplayId" else ""
                 connection.executeShell("input$displayArg swipe $realStartX $realStartY $realEndX $realEndY $durationMs")
             } catch (e: Exception) {
@@ -1204,6 +1367,26 @@ class ScrcpyController(
     }
 
     fun sendKeyEvent(keyCode: Int) {
+        val stream = controlStream
+        if (stream != null && !stream.isClosed) {
+            try {
+                fun writeKey(action: Int) {
+                    val buf = ByteArray(14)
+                    buf[0] = 0 // TYPE_INJECT_KEYCODE
+                    buf[1] = (action and 0xFF).toByte() // 0=DOWN, 1=UP
+                    buf[2] = ((keyCode ushr 24) and 0xFF).toByte()
+                    buf[3] = ((keyCode ushr 16) and 0xFF).toByte()
+                    buf[4] = ((keyCode ushr 8) and 0xFF).toByte()
+                    buf[5] = (keyCode and 0xFF).toByte()
+                    // repeat = 0 (bytes 6..9)
+                    // metaState = 0 (bytes 10..13)
+                    stream.write(buf)
+                }
+                writeKey(0) // DOWN
+                writeKey(1) // UP
+                return
+            } catch (_: Exception) {}
+        }
         scope.launch(Dispatchers.IO) {
             try {
                 connection.executeShell("input keyevent $keyCode")
@@ -1214,6 +1397,22 @@ class ScrcpyController(
     }
 
     fun sendText(text: String) {
+        val stream = controlStream
+        if (stream != null && !stream.isClosed) {
+            try {
+                val utf8 = text.toByteArray(Charsets.UTF_8)
+                val buf = ByteArray(5 + utf8.size)
+                buf[0] = 1 // TYPE_INJECT_TEXT
+                buf[1] = ((utf8.size ushr 24) and 0xFF).toByte()
+                buf[2] = ((utf8.size ushr 16) and 0xFF).toByte()
+                buf[3] = ((utf8.size ushr 8) and 0xFF).toByte()
+                buf[4] = (utf8.size and 0xFF).toByte()
+                System.arraycopy(utf8, 0, buf, 5, utf8.size)
+                stream.write(buf)
+                addLog("已通过控制通道发送文字: '$text'", LogLevel.INFO)
+                return
+            } catch (_: Exception) {}
+        }
         scope.launch(Dispatchers.IO) {
             try {
                 val escaped = text.replace(" ", "%s").replace("'", "\\'")
@@ -1229,7 +1428,82 @@ class ScrcpyController(
     fun sendBack() = sendKeyEvent(4)
     fun sendRecents() = sendKeyEvent(187)
     fun sendPower() = sendKeyEvent(26)
-    fun sendVolumeUp() = sendKeyEvent(24)
-    fun sendVolumeDown() = sendKeyEvent(25)
+    fun sendVolumeUp() {
+        sendKeyEvent(24)
+        addLog("发送远程设备系统音量+按键 (KEYCODE_VOLUME_UP)", LogLevel.INFO)
+    }
+    fun sendVolumeDown() {
+        sendKeyEvent(25)
+        addLog("发送远程设备系统音量-按键 (KEYCODE_VOLUME_DOWN)", LogLevel.INFO)
+    }
+    fun sendVolumeMute() {
+        sendKeyEvent(164)
+        addLog("发送远程设备系统静音切换按键 (KEYCODE_VOLUME_MUTE)", LogLevel.INFO)
+    }
+
+    fun setRemoteVolumeValue(stream: Int = 3, volumeIndex: Int) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                // Try cmd media_session first, then media volume, then service call audio
+                val cmd = "cmd media_session volume --stream $stream --set $volumeIndex 2>/dev/null || media volume --stream $stream --set $volumeIndex 2>/dev/null || service call audio 3 i32 $stream i32 $volumeIndex i32 1"
+                connection.executeShell(cmd)
+                addLog("设置远程设备系统音量 (Stream: $stream, 目标等级: $volumeIndex)", LogLevel.INFO)
+            } catch (e: Exception) {
+                addLog("设置远程系统音量失败: ${e.message}", LogLevel.WARN)
+            }
+        }
+    }
+
+    fun fetchRemoteVolume(stream: Int = 3, onResult: (current: Int, max: Int) -> Unit) {
+        scope.launch(Dispatchers.IO) {
+            var current = -1
+            var max = 15
+            try {
+                val out1 = connection.executeShell("cmd media_session volume --stream $stream --get 2>/dev/null")
+                // Format: volume is 10 in range [0..15] or [0..25]
+                val match1 = Regex("""volume is (\d+)(?: in range \[\d+\.\.(\d+)\])?""").find(out1)
+                if (match1 != null) {
+                    current = match1.groupValues[1].toIntOrNull() ?: -1
+                    val maxVal = match1.groupValues.getOrNull(2)?.toIntOrNull()
+                    if (maxVal != null && maxVal > 0) max = maxVal
+                }
+
+                if (current == -1) {
+                    val out2 = connection.executeShell("media volume --stream $stream --get 2>/dev/null")
+                    val match2 = Regex("""volume is (\d+)(?: in range \[\d+\.\.(\d+)\])?""").find(out2)
+                    if (match2 != null) {
+                        current = match2.groupValues[1].toIntOrNull() ?: -1
+                        val maxVal = match2.groupValues.getOrNull(2)?.toIntOrNull()
+                        if (maxVal != null && maxVal > 0) max = maxVal
+                    }
+                }
+
+                if (current == -1) {
+                    val dumpsys = connection.executeShell("dumpsys audio")
+                    val streamName = when (stream) {
+                        2 -> "STREAM_RING"
+                        4 -> "STREAM_ALARM"
+                        0 -> "STREAM_VOICE_CALL"
+                        else -> "STREAM_MUSIC"
+                    }
+                    val streamSection = dumpsys.substringAfter("- $streamName:", "").substringBefore("\n- STREAM_")
+                    if (streamSection.isNotEmpty()) {
+                        val maxMatch = Regex("""Max:\s*(\d+)""").find(streamSection)
+                        if (maxMatch != null) max = maxMatch.groupValues[1].toIntOrNull() ?: 15
+                        val curMatch = Regex("""Current:\s*(?:\d+\s*\([^)]+\):\s*)?(\d+)""").find(streamSection)
+                        if (curMatch != null) {
+                            current = curMatch.groupValues[1].toIntOrNull() ?: -1
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                addLog("查询远程音量失败: ${e.message}", LogLevel.WARN)
+            }
+
+            withContext(Dispatchers.Main) {
+                onResult(if (current >= 0) current else 7, max)
+            }
+        }
+    }
 }
 

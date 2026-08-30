@@ -34,6 +34,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CleanHands
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
@@ -57,6 +59,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
@@ -67,6 +73,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -87,9 +94,17 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.yangyx.adbhelper.ui.AdbViewModel
+import android.util.LruCache
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import com.yangyx.adbhelper.ui.models.LocalAppItem
 import com.yangyx.adbhelper.ui.models.RemoteAppItem
 import com.yangyx.adbhelper.ui.models.RemoteProcessItem
+
+private val localAppIconCache = LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(120)
 
 private sealed class ConfirmAction {
     data class ForceStop(val app: RemoteAppItem) : ConfirmAction()
@@ -120,10 +135,25 @@ fun AppAndProcessScreen(
     var searchQuery by remember { mutableStateOf("") }
     var showSystemApps by remember { mutableStateOf(false) }
 
+    var processFilterMode by remember { mutableIntStateOf(0) } // 0: 仅第三方应用, 1: 包含系统应用, 2: 全部进程
     var pendingConfirmAction by remember { mutableStateOf<ConfirmAction?>(null) }
     var showDiagnosisDialog by remember { mutableStateOf(false) }
     var showInstallChoiceSheet by remember { mutableStateOf(false) }
     var showLocalAppsDialog by remember { mutableStateOf(false) }
+    var appToExport by remember { mutableStateOf<RemoteAppItem?>(null) }
+
+    // App APK Export Launcher (CreateDocument)
+    val exportApkLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { uri: Uri? ->
+        val targetApp = appToExport
+        if (uri != null && targetApp != null) {
+            val fileName = "${targetApp.appName.ifBlank { targetApp.packageName }}_${targetApp.packageName}.apk"
+                .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            viewModel.exportAppApk(context, targetApp, uri, fileName)
+        }
+        appToExport = null
+    }
 
     // Deduplicated initial loading
     LaunchedEffect(Unit) {
@@ -174,7 +204,7 @@ fun AppAndProcessScreen(
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    placeholder = { Text("搜索应用或进程包名/PID...") },
+                    placeholder = { Text(if (selectedTabIndex == 0) "搜索应用包名或名称..." else "搜索应用名称/包名/PID...") },
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search") },
                     singleLine = true,
                     modifier = Modifier.weight(1f)
@@ -195,12 +225,14 @@ fun AppAndProcessScreen(
 
             if (selectedTabIndex == 0) {
                 // Apps Tab
-                val filteredApps = remember(apps, searchQuery, showSystemApps) {
-                    apps.filter { app ->
-                        (showSystemApps || !app.isSystemApp) &&
-                                (searchQuery.isBlank() ||
-                                        app.packageName.contains(searchQuery, ignoreCase = true) ||
-                                        app.appName.contains(searchQuery, ignoreCase = true))
+                val filteredApps by remember(apps, searchQuery, showSystemApps) {
+                    derivedStateOf {
+                        apps.filter { app ->
+                            (showSystemApps || !app.isSystemApp) &&
+                                    (searchQuery.isBlank() ||
+                                            app.packageName.contains(searchQuery, ignoreCase = true) ||
+                                            app.appName.contains(searchQuery, ignoreCase = true))
+                        }
                     }
                 }
 
@@ -270,9 +302,19 @@ fun AppAndProcessScreen(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(filteredApps, key = { it.packageName }) { app ->
+                    items(
+                        items = filteredApps,
+                        key = { "app_${it.packageName}" },
+                        contentType = { "app_item" }
+                    ) { app ->
                         AppItemCard(
                             app = app,
+                            onExport = {
+                                appToExport = app
+                                val safeName = "${app.appName.ifBlank { app.packageName }}_${app.packageName}.apk"
+                                    .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                                exportApkLauncher.launch(safeName)
+                            },
                             onLaunch = { viewModel.launchApp(app.packageName) },
                             onForceStop = { pendingConfirmAction = ConfirmAction.ForceStop(app) },
                             onUninstall = { pendingConfirmAction = ConfirmAction.Uninstall(app) },
@@ -281,23 +323,95 @@ fun AppAndProcessScreen(
                     }
                 }
             } else {
-                // Processes Tab
-                val filteredProcesses = remember(processes, searchQuery) {
-                    if (searchQuery.isBlank()) processes else processes.filter {
-                        it.name.contains(searchQuery, ignoreCase = true) ||
-                                it.pid.toString().contains(searchQuery)
+                // Processes Tab - Focusing on Running Apps
+                val filteredProcesses by remember(processes, searchQuery, processFilterMode) {
+                    derivedStateOf {
+                        processes.filter { proc ->
+                            val matchesSearch = if (searchQuery.isBlank()) true else {
+                                proc.name.contains(searchQuery, ignoreCase = true) ||
+                                        proc.appTitle.contains(searchQuery, ignoreCase = true) ||
+                                        proc.packageName.contains(searchQuery, ignoreCase = true) ||
+                                        proc.pid.toString().contains(searchQuery)
+                            }
+                            val matchesFilter = when (processFilterMode) {
+                                0 -> proc.isUserApp
+                                1 -> proc.isUserApp || proc.isSystemApp || proc.packageName.isNotEmpty()
+                                else -> true
+                            }
+                            matchesSearch && matchesFilter
+                        }
                     }
                 }
 
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(filteredProcesses, key = { it.pid }) { proc ->
-                        ProcessItemCard(
-                            proc = proc,
-                            onKill = { pendingConfirmAction = ConfirmAction.KillProcess(proc) }
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = processFilterMode == 0,
+                            onClick = { processFilterMode = 0 },
+                            label = { Text("运行中应用", fontSize = 12.sp) },
+                            leadingIcon = if (processFilterMode == 0) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            } else null
                         )
+                        FilterChip(
+                            selected = processFilterMode == 1,
+                            onClick = { processFilterMode = 1 },
+                            label = { Text("包含系统应用", fontSize = 12.sp) },
+                            leadingIcon = if (processFilterMode == 1) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            } else null
+                        )
+                        FilterChip(
+                            selected = processFilterMode == 2,
+                            onClick = { processFilterMode = 2 },
+                            label = { Text("全部进程", fontSize = 12.sp) },
+                            leadingIcon = if (processFilterMode == 2) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                            } else null
+                        )
+                    }
+
+                    Text(
+                        text = "共 ${filteredProcesses.size} 个运行中${if (processFilterMode == 0) "应用" else "进程"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                }
+
+                if (filteredProcesses.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (processFilterMode == 0) "未发现运行中的第三方应用" else "无匹配进程",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(
+                            items = filteredProcesses,
+                            key = { "proc_${it.pid}_${it.packageName}_${it.name}" },
+                            contentType = { "proc_item" }
+                        ) { proc ->
+                            ProcessItemCard(
+                                proc = proc,
+                                onKill = { pendingConfirmAction = ConfirmAction.KillProcess(proc) }
+                            )
+                        }
                     }
                 }
             }
@@ -496,10 +610,15 @@ fun AppAndProcessScreen(
                     onConfirm = { viewModel.uninstallApp(action.app.packageName) }
                 }
                 is ConfirmAction.KillProcess -> {
-                    title = "确认结束进程"
-                    text = "确定要结束进程「${action.proc.name}」(PID: ${action.proc.pid}) 吗？"
-                    confirmLabel = "结束进程"
-                    onConfirm = { viewModel.killProcess(action.proc.pid) }
+                    val displayName = action.proc.appTitle.ifEmpty { action.proc.name }
+                    title = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) "确认停止运行中应用" else "确认结束系统进程"
+                    text = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) {
+                        "确定要强行停止并杀死应用「$displayName」(${action.proc.packageName.ifEmpty { action.proc.name }}) 吗？\n\n该操作将终止被控端该应用的所有前后台活动与服务。"
+                    } else {
+                        "确定要结束底层系统进程「${action.proc.name}」(PID: ${action.proc.pid}) 吗？"
+                    }
+                    confirmLabel = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) "停止应用" else "结束进程"
+                    onConfirm = { viewModel.killProcess(action.proc) }
                 }
             }
 
@@ -586,17 +705,19 @@ fun LocalAppsInstallDialog(
     var showSystemApps by remember { mutableStateOf(false) }
     var pendingSplitConfirmApp by remember { mutableStateOf<LocalAppItem?>(null) }
 
-    val filteredList = remember(localApps, searchQuery, filterMode, showSystemApps) {
-        localApps.filter { app ->
-            (showSystemApps || !app.isSystemApp) &&
-                    (when (filterMode) {
-                        1 -> app.isSingleApk
-                        2 -> !app.isSingleApk
-                        else -> true
-                    }) &&
-                    (searchQuery.isBlank() ||
-                            app.appName.contains(searchQuery, ignoreCase = true) ||
-                            app.packageName.contains(searchQuery, ignoreCase = true))
+    val filteredList by remember(localApps, searchQuery, filterMode, showSystemApps) {
+        derivedStateOf {
+            localApps.filter { app ->
+                (showSystemApps || !app.isSystemApp) &&
+                        (when (filterMode) {
+                            1 -> app.isSingleApk
+                            2 -> !app.isSingleApk
+                            else -> true
+                        }) &&
+                        (searchQuery.isBlank() ||
+                                app.appName.contains(searchQuery, ignoreCase = true) ||
+                                app.packageName.contains(searchQuery, ignoreCase = true))
+            }
         }
     }
 
@@ -729,7 +850,11 @@ fun LocalAppsInstallDialog(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(filteredList, key = { it.packageName }) { app ->
+                        items(
+                            items = filteredList,
+                            key = { "local_${it.packageName}" },
+                            contentType = { if (it.isSingleApk) "single" else "split" }
+                        ) { app ->
                             LocalAppItemCard(
                                 app = app,
                                 onInstall = {
@@ -805,11 +930,11 @@ fun LocalAppItemCard(
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // App Icon
+            // App Icon with LRU Memory Cache
             val imageBitmap = remember(app.packageName) {
-                app.icon?.let { drawable ->
+                localAppIconCache.get(app.packageName) ?: app.icon?.let { drawable ->
                     try {
-                        if (drawable is BitmapDrawable && drawable.bitmap != null) {
+                        val bmp = if (drawable is BitmapDrawable && drawable.bitmap != null) {
                             drawable.bitmap.asImageBitmap()
                         } else {
                             val w = if (drawable.intrinsicWidth > 0) drawable.intrinsicWidth else 96
@@ -820,6 +945,8 @@ fun LocalAppItemCard(
                             drawable.draw(c)
                             b.asImageBitmap()
                         }
+                        if (bmp != null) localAppIconCache.put(app.packageName, bmp)
+                        bmp
                     } catch (_: Exception) {
                         null
                     }
@@ -915,11 +1042,14 @@ fun LocalAppItemCard(
 @Composable
 fun AppItemCard(
     app: RemoteAppItem,
+    onExport: () -> Unit,
     onLaunch: () -> Unit,
     onForceStop: () -> Unit,
     onUninstall: () -> Unit,
     onClearData: () -> Unit
 ) {
+    var showMenu by remember { mutableStateOf(false) }
+
     Card(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
@@ -927,51 +1057,158 @@ fun AppItemCard(
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                    shape = CircleShape,
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.Android, contentDescription = "App", tint = MaterialTheme.colorScheme.primary)
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = app.appName, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Text(text = app.packageName, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                color = if (app.isSystemApp) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+                shape = CircleShape,
+                modifier = Modifier.size(42.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = if (app.isSystemApp) Icons.Default.PhoneAndroid else Icons.Default.Android,
+                        contentDescription = "App",
+                        tint = if (app.isSystemApp) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
-            ) {
-                TextButton(onClick = onLaunch) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = "Launch", modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("启动")
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = app.appName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (app.isSystemApp) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = MaterialTheme.colorScheme.tertiaryContainer
+                        ) {
+                            Text(
+                                text = "系统",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                 }
-                TextButton(onClick = onForceStop) {
-                    Icon(Icons.Default.Stop, contentDescription = "Stop", modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("强停")
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = app.packageName,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "更多操作",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                TextButton(onClick = onClearData) {
-                    Icon(Icons.Default.CleanHands, contentDescription = "Clear", modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("清除")
-                }
-                TextButton(onClick = onUninstall) {
-                    Icon(Icons.Default.Delete, contentDescription = "Uninstall", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("卸载", color = MaterialTheme.colorScheme.error)
+
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("导出 APK (下载)") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Download,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            showMenu = false
+                            onExport()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("启动应用") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            showMenu = false
+                            onLaunch()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("强制停止") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Stop,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            showMenu = false
+                            onForceStop()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("清除数据") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.CleanHands,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            showMenu = false
+                            onClearData()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                "卸载应用",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        onClick = {
+                            showMenu = false
+                            onUninstall()
+                        }
+                    )
                 }
             }
         }
@@ -983,26 +1220,129 @@ fun ProcessItemCard(
     proc: RemoteProcessItem,
     onKill: () -> Unit
 ) {
+    val displayName = proc.appTitle.ifEmpty { proc.name }
+    val isApp = proc.isUserApp || proc.packageName.isNotEmpty()
+
     Card(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = proc.name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Text(text = "PID: ${proc.pid} | User: ${proc.user} | CPU: ${proc.cpuUsage}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Surface(
+                color = if (proc.isUserApp) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                shape = CircleShape,
+                modifier = Modifier.size(40.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = if (isApp) Icons.Default.Android else Icons.Default.Memory,
+                        contentDescription = null,
+                        tint = if (proc.isUserApp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
-            TextButton(onClick = onKill) {
-                Icon(Icons.Default.Delete, contentDescription = "Kill Process", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = displayName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    if (proc.isUserApp) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "用户应用",
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+                        }
+                    } else if (proc.isSystemApp) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "系统应用",
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(2.dp))
+
+                val subInfo = buildString {
+                    if (proc.packageName.isNotEmpty() && proc.packageName != displayName) {
+                        append(proc.packageName)
+                        append(" • ")
+                    }
+                    append("PID: ")
+                    append(proc.pid)
+                    if (proc.memUsage.isNotEmpty() && proc.memUsage != "0") {
+                        append(" • 内存: ")
+                        append(proc.memUsage)
+                    }
+                }
+
+                Text(
+                    text = subInfo,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            OutlinedButton(
+                onClick = onKill,
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Icon(
+                    Icons.Default.Stop,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.error
+                )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("结束进程", color = MaterialTheme.colorScheme.error)
+                Text(
+                    text = if (isApp) "停止应用" else "结束",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }

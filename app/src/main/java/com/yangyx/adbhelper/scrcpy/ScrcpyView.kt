@@ -28,6 +28,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +48,15 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreHoriz
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.platform.LocalConfiguration
@@ -76,10 +88,35 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.FilterChip
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.VolumeDown
+import androidx.compose.material.icons.filled.VolumeMute
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.PanTool
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
+import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Gesture
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import com.yangyx.adbhelper.touch.MultiTouchVisualOverlay
+import com.yangyx.adbhelper.touch.RemoteTouchpadScreen
 import com.yangyx.adbhelper.ui.models.RemoteAppItem
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -384,167 +421,168 @@ fun ScrcpyView(
             is ScreenState.Idle -> {
                 val isCameraSource = config.videoSource.equals("camera", ignoreCase = true)
 
-                Column(
+                LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
+                        .padding(horizontal = 16.dp),
+                    contentPadding = PaddingValues(vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(20.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                    item(key = "hero_banner") {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(
-                                imageVector = if (isCameraSource) Icons.Default.Videocam else Icons.Default.AspectRatio,
-                                contentDescription = "Screen Remote",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(56.dp)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = if (isCameraSource) "远程摄像头画面镜像" else "远程屏幕投屏与同步操作",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = if (isCameraSource) "低延迟摄像头视频流捕获 (支持 Android 12+ 及麦克风声音采集)" else "低延迟画面传输与实时触摸手势交互",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            Column(
+                                modifier = Modifier.padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Button(
-                                    onClick = {
-                                        if (!ScrcpyServerManager.isServerReady(context)) {
-                                            isServerCardExpanded = true
-                                            android.widget.Toast.makeText(context, "scrcpy-server 组件未就绪，请先下载", android.widget.Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            controller.startMirroring()
-                                        }
-                                    },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(48.dp)
-                                ) {
-                                    Icon(if (isCameraSource) Icons.Default.Videocam else Icons.Default.PlayArrow, contentDescription = null)
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(if (isCameraSource) "启动相机镜像" else "启动屏幕投屏", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                                }
+                                Icon(
+                                    imageVector = if (isCameraSource) Icons.Default.Videocam else Icons.Default.AspectRatio,
+                                    contentDescription = "Screen Remote",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(56.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = if (isCameraSource) "远程摄像头画面镜像" else "远程屏幕投屏与同步操作",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (isCameraSource) "低延迟摄像头视频流捕获 (支持 Android 12+ 及麦克风声音采集)" else "低延迟画面传输与实时触摸手势交互",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
 
-                                OutlinedButton(
-                                    onClick = { controller.wakeUpRemoteScreen() },
-                                    modifier = Modifier.height(48.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
-                                    Icon(Icons.Default.LockOpen, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("唤醒屏幕")
+                                    Button(
+                                        onClick = {
+                                            if (!ScrcpyServerManager.isServerReady(context)) {
+                                                isServerCardExpanded = true
+                                                android.widget.Toast.makeText(context, "scrcpy-server 组件未就绪，请先下载", android.widget.Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                controller.startMirroring()
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                    ) {
+                                        Icon(if (isCameraSource) Icons.Default.Videocam else Icons.Default.PlayArrow, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(if (isCameraSource) "启动相机镜像" else "启动屏幕投屏", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = { controller.wakeUpRemoteScreen() },
+                                        modifier = Modifier.height(48.dp)
+                                    ) {
+                                        Icon(Icons.Default.LockOpen, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("唤醒屏幕")
+                                    }
                                 }
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // scrcpy-server JAR Component Management Card
-                    ScrcpyServerComponentCard(
-                        isExpanded = isServerCardExpanded,
-                        onToggleExpand = { isServerCardExpanded = !isServerCardExpanded }
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Pre-Start Settings Card
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(20.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("投屏与相机参数预设 (自动保存)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                                }
-                                Surface(
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Text(
-                                        "已记住",
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(16.dp))
-
-                            ScrcpyConfigSettingsSection(
-                                config = config,
-                                controller = controller,
-                                onQueryCameras = {
-                                    cameraQueryMode = CameraQueryMode.CAMERAS
-                                    cameraInfoTitle = "被控端可用摄像头列表 (--list-cameras)"
-                                    cameraInfoText = "正在通过 ADB 查询设备摄像头硬件..."
-                                    isQueryingCameraInfo = true
-                                    showCameraInfoDialog = true
-                                    controller.listAvailableCameras { result ->
-                                        cameraInfoText = result
-                                        isQueryingCameraInfo = false
-                                    }
-                                },
-                                onQueryCameraSizes = {
-                                    cameraQueryMode = CameraQueryMode.SIZES
-                                    val camId = config.cameraId.ifEmpty { "0" }
-                                    cameraInfoTitle = "摄像头 (ID: $camId) 支持的分辨率尺寸"
-                                    cameraInfoText = "正在通过 ADB 查询相机尺寸列表..."
-                                    isQueryingCameraInfo = true
-                                    showCameraInfoDialog = true
-                                    controller.listAvailableCameraSizes(camId) { result ->
-                                        cameraInfoText = result
-                                        isQueryingCameraInfo = false
-                                    }
-                                }
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Realtime Log Card View
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        LogConsoleView(
-                            logs = logs,
-                            onClear = { controller.clearLogs() },
-                            onCopy = { controller.copyLogsToClipboard(context) },
-                            modifier = Modifier.padding(16.dp)
+                    item(key = "server_component") {
+                        // scrcpy-server JAR Component Management Card
+                        ScrcpyServerComponentCard(
+                            isExpanded = isServerCardExpanded,
+                            onToggleExpand = { isServerCardExpanded = !isServerCardExpanded }
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(24.dp))
+                    item(key = "settings_section") {
+                        // Pre-Start Settings Card
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(20.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("投屏与相机参数预设 (自动保存)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                    }
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text(
+                                            "已记住",
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                ScrcpyConfigSettingsSection(
+                                    config = config,
+                                    controller = controller,
+                                    onQueryCameras = {
+                                        cameraQueryMode = CameraQueryMode.CAMERAS
+                                        cameraInfoTitle = "被控端可用摄像头列表 (--list-cameras)"
+                                        cameraInfoText = "正在通过 ADB 查询设备摄像头硬件..."
+                                        isQueryingCameraInfo = true
+                                        showCameraInfoDialog = true
+                                        controller.listAvailableCameras { result ->
+                                            cameraInfoText = result
+                                            isQueryingCameraInfo = false
+                                        }
+                                    },
+                                    onQueryCameraSizes = {
+                                        cameraQueryMode = CameraQueryMode.SIZES
+                                        val camId = config.cameraId.ifEmpty { "0" }
+                                        cameraInfoTitle = "摄像头 (ID: $camId) 支持的分辨率尺寸"
+                                        cameraInfoText = "正在通过 ADB 查询相机尺寸列表..."
+                                        isQueryingCameraInfo = true
+                                        showCameraInfoDialog = true
+                                        controller.listAvailableCameraSizes(camId) { result ->
+                                            cameraInfoText = result
+                                            isQueryingCameraInfo = false
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    item(key = "log_console") {
+                        // Realtime Log Card View
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            LogConsoleView(
+                                logs = logs,
+                                onClear = { controller.clearLogs() },
+                                onCopy = { controller.copyLogsToClipboard(context) },
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
                 }
             }
             is ScreenState.Connecting -> {
@@ -1408,6 +1446,13 @@ private fun StreamingViewContent(
     var overlayOffsetX by remember { mutableStateOf(0f) }
     var overlayOffsetY by remember { mutableStateOf(0f) }
     var cameraRotationDegrees by remember { mutableIntStateOf(0) }
+    var showMultiTouchDialog by remember { mutableStateOf(false) }
+    var showVolumeDialog by remember { mutableStateOf(false) }
+    var isTopBarExpanded by remember { mutableStateOf(true) }
+    var isToolbarExpanded by remember { mutableStateOf(true) }
+    var miniFabOffsetX by remember { mutableFloatStateOf(0f) }
+    var miniFabOffsetY by remember { mutableFloatStateOf(0f) }
+    val context = LocalContext.current
 
     val isCamera = config.videoSource.equals("camera", ignoreCase = true)
     val isRotated90or270 = isCamera && (cameraRotationDegrees % 180 != 0)
@@ -1451,60 +1496,8 @@ private fun StreamingViewContent(
                             videoWidth = coordinates.size.width.toFloat()
                             videoHeight = coordinates.size.height.toFloat()
                         }
-                        .then(
-                            if (!isCamera) {
-                                Modifier.pointerInput(state.width, state.height, videoWidth, videoHeight) {
-                                    awaitEachGesture {
-                                        val down = awaitFirstDown(requireUnconsumed = false)
-                                        val pathList = mutableListOf<Pair<Int, Int>>()
-
-                                        val startCoord = mapLocalTouchToRemote(
-                                            down.position.x, down.position.y,
-                                            videoWidth, videoHeight,
-                                            state.width, state.height
-                                        )
-                                        if (startCoord != null) {
-                                            pathList.add(startCoord)
-                                            controller.sendTouchEvent("DOWN", startCoord.first, startCoord.second)
-                                        }
-
-                                        var lastPos = down.position
-
-                                        do {
-                                            val event = awaitPointerEvent()
-                                            val pointerChange = event.changes.firstOrNull { it.id == down.id } ?: break
-                                            if (pointerChange.pressed) {
-                                                val currentPos = pointerChange.position
-                                                if ((currentPos - lastPos).getDistance() > 4f) {
-                                                    lastPos = currentPos
-                                                    val remoteCoord = mapLocalTouchToRemote(
-                                                        currentPos.x, currentPos.y,
-                                                        videoWidth, videoHeight,
-                                                        state.width, state.height
-                                                    )
-                                                    if (remoteCoord != null) {
-                                                        pathList.add(remoteCoord)
-                                                        controller.sendTouchEvent("MOVE", remoteCoord.first, remoteCoord.second)
-                                                    }
-                                                }
-                                            } else {
-                                                val upCoord = mapLocalTouchToRemote(
-                                                    pointerChange.position.x, pointerChange.position.y,
-                                                    videoWidth, videoHeight,
-                                                    state.width, state.height
-                                                ) ?: pathList.lastOrNull()
-
-                                                if (upCoord != null) {
-                                                    controller.sendTouchEvent("UP", upCoord.first, upCoord.second)
-                                                }
-                                                break
-                                            }
-                                        } while (event.changes.any { it.pressed })
-                                    }
-                                }
-                            } else Modifier
-                        )
                 ) {
+                    // 1. TextureView for rendering Scrcpy / Camera video stream
                     AndroidView(
                         factory = { ctx ->
                             TextureView(ctx).apply {
@@ -1537,201 +1530,872 @@ private fun StreamingViewContent(
                         },
                         modifier = Modifier.fillMaxSize()
                     )
-                }
-            }
-        }
 
-        // Top info bar
-        Surface(
-            color = Color.Black.copy(alpha = 0.75f),
-            shape = RoundedCornerShape(20.dp),
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = if (isFullscreen) 28.dp else 12.dp)
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "${state.width}x${state.height} | ${state.fps.toInt()} FPS | ${state.latencyMs}ms" +
-                        if (isCamera && cameraRotationDegrees != 0) " | ${cameraRotationDegrees}°" else "",
-                    color = Color.Green,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
-                )
-                IconButton(
-                    onClick = onToggleFullscreen,
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                        contentDescription = if (isFullscreen) "退出全屏" else "全屏模式",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                Surface(
-                    onClick = { controller.stopMirroring() },
-                    color = MaterialTheme.colorScheme.error,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.height(28.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "断开投屏",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
+                    // 2. High-performance Remote Multi-Touch Capture Layer
+                    if (!isCamera) {
+                        AndroidView(
+                            factory = { ctx ->
+                                android.view.View(ctx).apply {
+                                    isFocusable = true
+                                    isFocusableInTouchMode = true
+                                    setOnTouchListener { v, event ->
+                                        val vw = v.width
+                                        val vh = v.height
+                                        val isAv1 = controller.config.value.videoCodec.equals("av1", ignoreCase = true) || controller.config.value.videoCodec.equals("av01", ignoreCase = true)
+                                        val targetW = if (isAv1) {
+                                            controller.remoteWidth.takeIf { it > 0 } ?: (if (controller.nativeWidth > 0) controller.nativeWidth else state.width)
+                                        } else {
+                                            if (controller.nativeWidth > 0) controller.nativeWidth else state.width
+                                        }
+                                        val targetH = if (isAv1) {
+                                            controller.remoteHeight.takeIf { it > 0 } ?: (if (controller.nativeHeight > 0) controller.nativeHeight else state.height)
+                                        } else {
+                                            if (controller.nativeHeight > 0) controller.nativeHeight else state.height
+                                        }
+                                        if (vw > 0 && vh > 0 && targetW > 0 && targetH > 0) {
+                                            controller.multiTouchController.onNativeMotionEvent(
+                                                event = event,
+                                                viewWidth = vw,
+                                                viewHeight = vh,
+                                                remoteWidth = targetW,
+                                                remoteHeight = targetH
+                                            )
+                                        }
+                                        true
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+
+                        // 3. Multi-Touch Visual Overlay (Visual Feedback, Rings, Badges, Distance & Trails)
+                        MultiTouchVisualOverlay(
+                            controller = controller.multiTouchController,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
             }
         }
 
-        // Floating draggable navigation bar
+        // Top info bar (Collapsible & Expandable)
+        if (isTopBarExpanded) {
+            Surface(
+                color = Color.Black.copy(alpha = 0.8f),
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = if (isFullscreen) 28.dp else 12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "${state.width}x${state.height} | ${state.fps.toInt()} FPS | ${state.latencyMs}ms" +
+                            (if (isCamera && cameraRotationDegrees != 0) " | ${cameraRotationDegrees}°" else ""),
+                        color = Color.Green,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    IconButton(
+                        onClick = onToggleFullscreen,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                            contentDescription = if (isFullscreen) "退出全屏" else "全屏模式",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Surface(
+                        onClick = { controller.stopMirroring() },
+                        color = MaterialTheme.colorScheme.error,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(26.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "断开投屏",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { isTopBarExpanded = false },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowUp,
+                            contentDescription = "折叠悬浮条",
+                            tint = Color.White.copy(alpha = 0.8f),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+        } else {
+            // Collapsed Top Info Badge
+            Surface(
+                onClick = { isTopBarExpanded = true },
+                color = Color.Black.copy(alpha = 0.75f),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = if (isFullscreen) 24.dp else 10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .background(Color.Green, CircleShape)
+                    )
+                    Text(
+                        text = "${state.fps.toInt()} FPS",
+                        color = Color.Green,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "展开悬浮条",
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+
+        // Floating draggable navigation bar (Collapsible & Expandable with Long-press Tooltips)
         val isVirtualActive by controller.isVirtualDisplayActive.collectAsState()
         val screenWidthDp = LocalConfiguration.current.screenWidthDp
 
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f),
-            shape = RoundedCornerShape(28.dp),
-            tonalElevation = 8.dp,
-            shadowElevation = 12.dp,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = if (isFullscreen) 36.dp else 24.dp)
-                .widthIn(max = (screenWidthDp - 20).dp)
-                .offset { IntOffset(overlayOffsetX.roundToInt(), overlayOffsetY.roundToInt()) }
-                .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        overlayOffsetX += dragAmount.x
-                        overlayOffsetY += dragAmount.y
-                    }
-                }
-        ) {
-            Row(
+        if (isToolbarExpanded) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
+                shape = RoundedCornerShape(28.dp),
+                tonalElevation = 8.dp,
+                shadowElevation = 12.dp,
                 modifier = Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = if (isFullscreen) 36.dp else 24.dp)
+                    .widthIn(max = (screenWidthDp - 20).dp)
+                    .offset { IntOffset(overlayOffsetX.roundToInt(), overlayOffsetY.roundToInt()) }
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            overlayOffsetX += dragAmount.x
+                            overlayOffsetY += dragAmount.y
+                        }
+                    }
             ) {
-                if (!isCamera) {
-                    IconButton(onClick = { controller.sendBack() }) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    @OptIn(ExperimentalFoundationApi::class)
+                    @Composable
+                    fun ToolbarActionItem(
+                        icon: androidx.compose.ui.graphics.vector.ImageVector,
+                        name: String,
+                        detailName: String = name,
+                        tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        onClick: () -> Unit
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .combinedClickable(
+                                    onClick = onClick,
+                                    onLongClick = {
+                                        Toast.makeText(context, "功能: $detailName", Toast.LENGTH_SHORT).show()
+                                    }
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = name,
+                                tint = tint,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
-                    IconButton(onClick = { controller.sendHome() }) {
-                        Icon(Icons.Default.Home, contentDescription = "主页")
-                    }
-                    IconButton(onClick = { controller.sendRecents() }) {
-                        Icon(Icons.Default.RecentActors, contentDescription = "多任务")
-                    }
-                    IconButton(onClick = { controller.wakeUpRemoteScreen() }) {
-                        Icon(Icons.Default.LockOpen, contentDescription = "唤醒点亮屏幕", tint = MaterialTheme.colorScheme.primary)
-                    }
-                    IconButton(onClick = {
-                        val newStayAwake = !config.isStayAwake
-                        controller.updateConfig(config.copy(isStayAwake = newStayAwake))
-                    }) {
-                        Icon(
-                            Icons.Default.WbSunny,
-                            contentDescription = "阻止休眠",
-                            tint = if (config.isStayAwake) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+
+                    if (!isCamera) {
+                        ToolbarActionItem(
+                            icon = Icons.Default.ArrowBack,
+                            name = "返回",
+                            detailName = "返回键 (Back)",
+                            onClick = { controller.sendBack() }
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.Default.Home,
+                            name = "主页",
+                            detailName = "主页键 (Home)",
+                            onClick = { controller.sendHome() }
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.Default.RecentActors,
+                            name = "多任务",
+                            detailName = "多任务 / 最近应用 (Recents)",
+                            onClick = { controller.sendRecents() }
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.Default.LockOpen,
+                            name = "唤醒屏幕",
+                            detailName = "唤醒并点亮对端屏幕",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = { controller.wakeUpRemoteScreen() }
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.Default.TouchApp,
+                            name = "多点触控",
+                            detailName = "多点触控与手势辅助设置",
+                            onClick = { showMultiTouchDialog = true }
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.Default.WbSunny,
+                            name = "阻止休眠",
+                            detailName = if (config.isStayAwake) "关闭屏幕常亮保持" else "开启屏幕常亮保持 (阻止休眠)",
+                            tint = if (config.isStayAwake) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = {
+                                val newStayAwake = !config.isStayAwake
+                                controller.updateConfig(config.copy(isStayAwake = newStayAwake))
+                            }
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.Default.Keyboard,
+                            name = "文字输入",
+                            detailName = "发送文本/剪贴板内容到远端",
+                            onClick = onShowTextInput
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.Default.ScreenLockPortrait,
+                            name = "熄屏控制",
+                            detailName = if (config.isScreenOff) "点亮远端实体屏幕" else "熄灭对端实体屏幕 (仅镜像)",
+                            tint = if (config.isScreenOff) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = {
+                                val newScreenOff = !config.isScreenOff
+                                controller.updateConfig(config.copy(isScreenOff = newScreenOff))
+                            }
                         )
                     }
-                    IconButton(onClick = onShowTextInput) {
-                        Icon(Icons.Default.Keyboard, contentDescription = "文字输入")
-                    }
-                    IconButton(onClick = {
-                        val newScreenOff = !config.isScreenOff
-                        controller.updateConfig(config.copy(isScreenOff = newScreenOff))
-                    }) {
-                        Icon(
-                            Icons.Default.ScreenLockPortrait,
-                            contentDescription = "熄屏控制",
-                            tint = if (config.isScreenOff) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    if (isCamera) {
+                        ToolbarActionItem(
+                            icon = Icons.AutoMirrored.Filled.RotateLeft,
+                            name = "向左旋转",
+                            detailName = "摄像头画面逆时针旋转 90°",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = {
+                                cameraRotationDegrees = (cameraRotationDegrees - 90 + 360) % 360
+                            }
+                        )
+                        ToolbarActionItem(
+                            icon = Icons.AutoMirrored.Filled.RotateRight,
+                            name = "向右旋转",
+                            detailName = "摄像头画面顺时针旋转 90°",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = {
+                                cameraRotationDegrees = (cameraRotationDegrees + 90) % 360
+                            }
+                        )
+                        ToolbarActionItem(
+                            icon = if (config.cameraTorch) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                            name = "闪光灯",
+                            detailName = if (config.cameraTorch) "关闭摄像头补光灯" else "打开摄像头补光灯",
+                            tint = if (config.cameraTorch) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = {
+                                val newTorch = !config.cameraTorch
+                                controller.updateConfig(config.copy(cameraTorch = newTorch))
+                            }
                         )
                     }
-                }
-                if (isCamera) {
-                    IconButton(onClick = {
-                        cameraRotationDegrees = (cameraRotationDegrees - 90 + 360) % 360
-                    }) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.RotateLeft,
-                            contentDescription = "向左旋转90°",
-                            tint = MaterialTheme.colorScheme.primary
+                    // Remote System Volume controls (independent from audio streaming)
+                    ToolbarActionItem(
+                        icon = Icons.Default.VolumeDown,
+                        name = "音量-",
+                        detailName = "降低被控端系统硬件音量 (Volume Down)",
+                        onClick = {
+                            controller.sendVolumeDown()
+                            Toast.makeText(context, "远程音量 -", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                    ToolbarActionItem(
+                        icon = Icons.Default.VolumeUp,
+                        name = "音量+",
+                        detailName = "增加被控端系统硬件音量 (Volume Up)",
+                        onClick = {
+                            controller.sendVolumeUp()
+                            Toast.makeText(context, "远程音量 +", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                    ToolbarActionItem(
+                        icon = Icons.Default.GraphicEq,
+                        name = "远端音量",
+                        detailName = "远程设备系统音量控制面板 (滑块/静音/通道)",
+                        tint = MaterialTheme.colorScheme.primary,
+                        onClick = { showVolumeDialog = true }
+                    )
+
+                    ToolbarActionItem(
+                        icon = Icons.Default.Headphones,
+                        name = "音频流转",
+                        detailName = if (config.isAudioEnabled) "关闭对端音频流转到本机" else "开启对端实时音频流转到本机",
+                        tint = if (config.isAudioEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        onClick = {
+                            val newAudio = !config.isAudioEnabled
+                            controller.updateConfig(config.copy(isAudioEnabled = newAudio))
+                        }
+                    )
+                    if (!isCamera) {
+                        ToolbarActionItem(
+                            icon = Icons.Default.Apps,
+                            name = "虚拟副屏",
+                            detailName = "开启独立虚拟副屏分屏",
+                            tint = if (isVirtualActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = onShowVirtualDisplay
                         )
                     }
-                    IconButton(onClick = {
-                        cameraRotationDegrees = (cameraRotationDegrees + 90) % 360
-                    }) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.RotateRight,
-                            contentDescription = "向右旋转90°",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    IconButton(onClick = {
-                        val newTorch = !config.cameraTorch
-                        controller.updateConfig(config.copy(cameraTorch = newTorch))
-                    }) {
-                        Icon(
-                            if (config.cameraTorch) Icons.Default.FlashOn else Icons.Default.FlashOff,
-                            contentDescription = "闪光灯",
-                            tint = if (config.cameraTorch) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
-                IconButton(onClick = {
-                    val newAudio = !config.isAudioEnabled
-                    controller.updateConfig(config.copy(isAudioEnabled = newAudio))
-                }) {
-                    Icon(
-                        imageVector = if (config.isAudioEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
-                        contentDescription = "音频传输",
-                        tint = if (config.isAudioEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    ToolbarActionItem(
+                        icon = Icons.Default.Terminal,
+                        name = "运行日志",
+                        detailName = "查看 Scrcpy 底层运行与调试日志",
+                        tint = MaterialTheme.colorScheme.primary,
+                        onClick = onShowLogs
+                    )
+                    ToolbarActionItem(
+                        icon = Icons.Default.Settings,
+                        name = "投屏设置",
+                        detailName = "调整分辨率、码率、编解码器与旋转",
+                        onClick = onShowSettings
+                    )
+                    ToolbarActionItem(
+                        icon = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                        name = "全屏显示",
+                        detailName = if (isFullscreen) "退出全屏模式" else "进入沉浸式全屏模式",
+                        tint = if (isFullscreen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        onClick = onToggleFullscreen
+                    )
+                    ToolbarActionItem(
+                        icon = Icons.Default.PowerSettingsNew,
+                        name = "断开投屏",
+                        detailName = "停止画面镜像并关闭连接",
+                        tint = MaterialTheme.colorScheme.error,
+                        onClick = { controller.stopMirroring() }
+                    )
+                    ToolbarActionItem(
+                        icon = Icons.Default.KeyboardArrowDown,
+                        name = "折叠工具栏",
+                        detailName = "收起工具栏为悬浮小球",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        onClick = { isToolbarExpanded = false }
                     )
                 }
-                if (!isCamera) {
-                    IconButton(onClick = onShowVirtualDisplay) {
-                        Icon(
-                            imageVector = Icons.Default.Apps,
-                            contentDescription = "虚拟副屏",
-                            tint = if (isVirtualActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
+            }
+        } else {
+            // Collapsed Floating Mini FAB/Bubble
+            Surface(
+                onClick = { isToolbarExpanded = true },
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f),
+                shape = CircleShape,
+                tonalElevation = 8.dp,
+                shadowElevation = 10.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = if (isFullscreen) 36.dp else 24.dp)
+                    .offset { IntOffset(miniFabOffsetX.roundToInt(), miniFabOffsetY.roundToInt()) }
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            miniFabOffsetX += dragAmount.x
+                            miniFabOffsetY += dragAmount.y
+                        }
                     }
-                }
-                IconButton(onClick = onShowLogs) {
-                    Icon(Icons.Default.Terminal, contentDescription = "运行日志", tint = MaterialTheme.colorScheme.primary)
-                }
-                IconButton(onClick = onShowSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "投屏设置")
-                }
-                IconButton(onClick = onToggleFullscreen) {
+                    .size(48.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                        contentDescription = if (isFullscreen) "退出全屏" else "全屏显示",
-                        tint = if (isFullscreen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                    )
-                }
-                IconButton(onClick = { controller.stopMirroring() }) {
-                    Icon(
-                        Icons.Default.PowerSettingsNew,
-                        contentDescription = "断开投屏",
-                        tint = MaterialTheme.colorScheme.error
+                        imageVector = Icons.Default.TouchApp,
+                        contentDescription = "展开工具栏 (长按可拖动)",
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
         }
+
+        // Multi-Touch Visual Feedback Settings Dialog
+        if (showMultiTouchDialog) {
+            val multiTouchStats by controller.multiTouchController.stats.collectAsState()
+            val activePointsMap by controller.multiTouchController.activePoints.collectAsState()
+
+            AlertDialog(
+                onDismissRequest = { showMultiTouchDialog = false },
+                icon = {
+                    Icon(
+                        Icons.Default.TouchApp,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                },
+                title = {
+                    Text("多点触控视觉反馈", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        // Visual overlay toggles
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("视觉反馈选项", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("显示触控光圈与按压深度", fontSize = 13.sp)
+                                    androidx.compose.material3.Switch(
+                                        checked = multiTouchStats.isOverlayVisible,
+                                        onCheckedChange = { controller.multiTouchController.toggleOverlayVisibility(it) }
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("显示指尖滑行轨迹", fontSize = 13.sp)
+                                    androidx.compose.material3.Switch(
+                                        checked = multiTouchStats.isTrailsEnabled,
+                                        onCheckedChange = { controller.multiTouchController.toggleTrails(it) }
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("显示实时坐标与指尖连线", fontSize = 13.sp)
+                                    androidx.compose.material3.Switch(
+                                        checked = multiTouchStats.isCoordinatesVisible,
+                                        onCheckedChange = { controller.multiTouchController.toggleCoordinates(it) }
+                                    )
+                                }
+                            }
+                        }
+
+                        // Real-time telemetry summary
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceAround
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("触控发包率", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("${multiTouchStats.eventsPerSecond.toInt()} pps", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                }
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("传输平均延迟", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("${multiTouchStats.lastLatencyMs} ms", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4CAF50))
+                                }
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("当前触点", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("${activePointsMap.size} 指", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { showMultiTouchDialog = false }) {
+                        Text("确定")
+                    }
+                }
+            )
+        }
+
+        // Remote Hardware/System Volume Control Dialog
+        if (showVolumeDialog) {
+            RemoteVolumeControlDialog(
+                controller = controller,
+                onDismiss = { showVolumeDialog = false }
+            )
+        }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RemoteVolumeControlDialog(
+    controller: ScrcpyController,
+    onDismiss: () -> Unit
+) {
+    var selectedStream by remember { mutableIntStateOf(3) } // 3=Music, 0=Voice, 2=Ring, 4=Alarm
+    var currentVolume by remember { mutableIntStateOf(7) }
+    var maxVolume by remember { mutableIntStateOf(15) }
+    var isLoading by remember { mutableStateOf(true) }
+    val context = LocalContext.current
+
+    // Query volume whenever stream changes or dialog is launched
+    LaunchedEffect(selectedStream) {
+        isLoading = true
+        controller.fetchRemoteVolume(selectedStream) { cur, max ->
+            currentVolume = cur
+            maxVolume = if (max > 0) max else 15
+            isLoading = false
+        }
+    }
+
+    val streamList = listOf(
+        Triple(3, "媒体音乐", Icons.Default.MusicNote),
+        Triple(0, "通话语音", Icons.Default.Phone),
+        Triple(2, "铃声通知", Icons.Default.Notifications),
+        Triple(4, "闹钟提示", Icons.Default.Alarm)
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.GraphicEq,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("远程终端系统音量", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "调节被控端设备的实际硬件输出音量",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // 2x2 Grid Channel Selector
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Row 1: 媒体音乐 + 通话语音
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            Triple(3, "媒体音乐", Icons.Default.MusicNote),
+                            Triple(0, "通话语音", Icons.Default.Phone)
+                        ).forEach { (streamId, streamTitle, streamIcon) ->
+                            val isSelected = selectedStream == streamId
+                            Surface(
+                                onClick = { selectedStream = streamId },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = streamIcon,
+                                        contentDescription = null,
+                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = streamTitle,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Row 2: 铃声通知 + 闹钟提示
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            Triple(2, "铃声通知", Icons.Default.Notifications),
+                            Triple(4, "闹钟提示", Icons.Default.Alarm)
+                        ).forEach { (streamId, streamTitle, streamIcon) ->
+                            val isSelected = selectedStream == streamId
+                            Surface(
+                                onClick = { selectedStream = streamId },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = streamIcon,
+                                        contentDescription = null,
+                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = streamTitle,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Volume Card Display & Slider
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "当前通道音量",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                val percent = if (maxVolume > 0) (currentVolume * 100 / maxVolume) else 0
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (currentVolume == 0) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer
+                                ) {
+                                    Text(
+                                        text = "$currentVolume / $maxVolume ($percent%)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (currentVolume == 0) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Slider
+                        Slider(
+                            value = currentVolume.toFloat().coerceIn(0f, maxVolume.toFloat()),
+                            onValueChange = { newVal ->
+                                val intVal = newVal.toInt()
+                                currentVolume = intVal
+                                controller.setRemoteVolumeValue(selectedStream, intVal)
+                            },
+                            valueRange = 0f..maxVolume.toFloat(),
+                            steps = if (maxVolume > 1) maxVolume - 1 else 0,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        // Preset chips (0% 静音, 25%, 50%, 75%, 100%) - evenly spaced without wrapping
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            listOf(0 to "静音", 25 to "25%", 50 to "50%", 75 to "75%", 100 to "100%").forEach { (pct, label) ->
+                                val targetVol = if (pct == 0) 0 else ((maxVolume * pct) / 100).coerceIn(1, maxVolume)
+                                val isCurrent = (currentVolume == targetVol)
+                                Surface(
+                                    onClick = {
+                                        currentVolume = targetVol
+                                        controller.setRemoteVolumeValue(selectedStream, targetVol)
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(vertical = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isCurrent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Quick Hardware Key Event Buttons (Vol-, Mute, Vol+) - spacious and well aligned
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilledTonalButton(
+                            onClick = {
+                                controller.sendVolumeDown()
+                                currentVolume = (currentVolume - 1).coerceAtLeast(0)
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Default.VolumeDown, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("音量 -", fontSize = 12.sp, maxLines = 1, softWrap = false)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                controller.sendVolumeMute()
+                                Toast.makeText(context, "已触发远程静音切换", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1.1f),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Default.VolumeMute, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("静音切换", fontSize = 12.sp, maxLines = 1, softWrap = false)
+                        }
+
+                        FilledTonalButton(
+                            onClick = {
+                                controller.sendVolumeUp()
+                                currentVolume = (currentVolume + 1).coerceAtMost(maxVolume)
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Default.VolumeUp, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("音量 +", fontSize = 12.sp, maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+
+                // Notice / info card
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "说明：此调节直接修改对端 Android 设备的系统物理硬件音量，与本地播放投屏音频流转互不影响。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 15.sp
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("完成")
+            }
+        }
+    )
 }
 
 @Composable
@@ -1891,7 +2555,7 @@ fun ScrcpyConfigSettingsSection(
                                     modifier = Modifier.weight(1f),
                                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp)
                                 ) {
-                                    Text(fLabel, fontSize = 11.sp)
+                                    Text(fLabel, fontSize = 11.sp, maxLines = 1, softWrap = false)
                                 }
                             } else {
                                 OutlinedButton(
@@ -1899,7 +2563,7 @@ fun ScrcpyConfigSettingsSection(
                                     modifier = Modifier.weight(1f),
                                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp)
                                 ) {
-                                    Text(fLabel, fontSize = 11.sp)
+                                    Text(fLabel, fontSize = 11.sp, maxLines = 1, softWrap = false)
                                 }
                             }
                         }
@@ -1947,7 +2611,7 @@ fun ScrcpyConfigSettingsSection(
                                     modifier = Modifier.weight(1f),
                                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp)
                                 ) {
-                                    Text(arLabel, fontSize = 11.sp)
+                                    Text(arLabel, fontSize = 11.sp, maxLines = 1, softWrap = false)
                                 }
                             } else {
                                 OutlinedButton(
@@ -1955,7 +2619,7 @@ fun ScrcpyConfigSettingsSection(
                                     modifier = Modifier.weight(1f),
                                     contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp)
                                 ) {
-                                    Text(arLabel, fontSize = 11.sp)
+                                    Text(arLabel, fontSize = 11.sp, maxLines = 1, softWrap = false)
                                 }
                             }
                         }
@@ -2020,7 +2684,7 @@ fun ScrcpyConfigSettingsSection(
             Spacer(modifier = Modifier.height(6.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 listOf(480, 720, 1080, 0).forEach { res ->
                     val isSelected = config.maxResolution == res
@@ -2028,16 +2692,20 @@ fun ScrcpyConfigSettingsSection(
                     if (isSelected) {
                         Button(
                             onClick = { controller.updateConfig(config.copy(maxResolution = res)) },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
                         ) {
-                            Text(label, fontSize = 13.sp)
+                            Text(label, fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                     } else {
                         OutlinedButton(
                             onClick = { controller.updateConfig(config.copy(maxResolution = res)) },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
                         ) {
-                            Text(label, fontSize = 13.sp)
+                            Text(label, fontSize = 12.sp, maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -2054,7 +2722,7 @@ fun ScrcpyConfigSettingsSection(
         Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             listOf("h264" to "H.264 (默认)", "h265" to "H.265 (HEVC)", "av1" to "AV1").forEach { (codecKey, codecLabel) ->
                 val isSelected = config.videoCodec.equals(codecKey, ignoreCase = true)
@@ -2062,17 +2730,19 @@ fun ScrcpyConfigSettingsSection(
                     Button(
                         onClick = { controller.updateConfig(config.copy(videoCodec = codecKey)) },
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
                     ) {
-                        Text(codecLabel, fontSize = 12.sp)
+                        Text(codecLabel, fontSize = 11.sp, maxLines = 1, softWrap = false)
                     }
                 } else {
                     OutlinedButton(
                         onClick = { controller.updateConfig(config.copy(videoCodec = codecKey)) },
                         modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
                     ) {
-                        Text(codecLabel, fontSize = 12.sp)
+                        Text(codecLabel, fontSize = 11.sp, maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -2089,7 +2759,7 @@ fun ScrcpyConfigSettingsSection(
         Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             listOf(15, 30, 60).forEach { fps ->
                 val isSelected = config.maxFps == fps
@@ -2097,16 +2767,20 @@ fun ScrcpyConfigSettingsSection(
                 if (isSelected) {
                     Button(
                         onClick = { controller.updateConfig(config.copy(maxFps = fps)) },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
                     ) {
-                        Text(label, fontSize = 13.sp)
+                        Text(label, fontSize = 12.sp, maxLines = 1, softWrap = false)
                     }
                 } else {
                     OutlinedButton(
                         onClick = { controller.updateConfig(config.copy(maxFps = fps)) },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
                     ) {
-                        Text(label, fontSize = 13.sp)
+                        Text(label, fontSize = 12.sp, maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -2119,7 +2793,7 @@ fun ScrcpyConfigSettingsSection(
         Spacer(modifier = Modifier.height(4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             listOf(4, 8, 16, 32, 64, 80).forEach { mbps ->
                 val bps = mbps * 1000000
@@ -2128,17 +2802,19 @@ fun ScrcpyConfigSettingsSection(
                     Button(
                         onClick = { controller.updateConfig(config.copy(bitrate = bps)) },
                         modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(0.dp)
                     ) {
-                        Text("${mbps}M", fontSize = 11.sp)
+                        Text("${mbps}M", fontSize = 11.sp, maxLines = 1, softWrap = false)
                     }
                 } else {
                     OutlinedButton(
                         onClick = { controller.updateConfig(config.copy(bitrate = bps)) },
                         modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(0.dp)
                     ) {
-                        Text("${mbps}M", fontSize = 11.sp)
+                        Text("${mbps}M", fontSize = 11.sp, maxLines = 1, softWrap = false)
                     }
                 }
             }

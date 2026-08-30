@@ -5,13 +5,16 @@ import androidx.room.PrimaryKey
 
 @Entity(tableName = "devices")
 data class DeviceEntity(
-    @PrimaryKey
-    val ipAddress: String,
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val serialNo: String = "",
+    val ipAddress: String = "",
     val port: Int = 5555,
     val name: String = "",
     val model: String = "",
     val aliasName: String = "",
     val lastConnectedTime: Long = System.currentTimeMillis(),
+    val sortOrder: Int = 0,
     val isFavorite: Boolean = false,
     val lastUsedBitrate: Int = 4000000,
     val lastUsedResolution: Int = 1080
@@ -26,3 +29,4 @@ data class CommandEntity(
     val timestamp: Long = System.currentTimeMillis(),
     val isSuccess: Boolean = true
 )
+

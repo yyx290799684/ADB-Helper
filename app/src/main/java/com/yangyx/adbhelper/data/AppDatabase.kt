@@ -11,7 +11,7 @@ import com.yangyx.adbhelper.data.entity.DeviceEntity
 
 @Database(
     entities = [DeviceEntity::class, CommandEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

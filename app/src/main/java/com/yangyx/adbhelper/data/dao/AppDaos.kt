@@ -11,20 +11,41 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface DeviceDao {
-    @Query("SELECT * FROM devices ORDER BY isFavorite DESC, lastConnectedTime DESC")
+    @Query("SELECT * FROM devices ORDER BY isFavorite DESC, sortOrder ASC, lastConnectedTime DESC")
     fun getAllDevices(): Flow<List<DeviceEntity>>
+
+    @Query("SELECT * FROM devices")
+    suspend fun getAllDevicesDirect(): List<DeviceEntity>
+
+    @Query("SELECT * FROM devices WHERE ipAddress = :ip AND port = :port LIMIT 1")
+    suspend fun getDeviceByIpAndPort(ip: String, port: Int): DeviceEntity?
 
     @Query("SELECT * FROM devices WHERE ipAddress = :ip LIMIT 1")
     suspend fun getDeviceByIp(ip: String): DeviceEntity?
 
+    @Query("SELECT * FROM devices WHERE serialNo = :serialNo")
+    suspend fun getDevicesBySerialNo(serialNo: String): List<DeviceEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrUpdateDevice(device: DeviceEntity)
+    suspend fun insertOrUpdateDevice(device: DeviceEntity): Long
+
+    @Query("DELETE FROM devices WHERE id = :id")
+    suspend fun deleteDeviceById(id: Long)
+
+    @Query("DELETE FROM devices WHERE ipAddress = :ip AND port = :port")
+    suspend fun deleteDeviceByIpAndPort(ip: String, port: Int)
 
     @Query("DELETE FROM devices WHERE ipAddress = :ip")
     suspend fun deleteDeviceByIp(ip: String)
 
+    @Query("DELETE FROM devices WHERE serialNo = :serialNo AND serialNo != ''")
+    suspend fun deleteDevicesBySerialNo(serialNo: String)
+
     @Update
     suspend fun updateDevice(device: DeviceEntity)
+
+    @Update
+    suspend fun updateDevices(devices: List<DeviceEntity>)
 }
 
 @Dao

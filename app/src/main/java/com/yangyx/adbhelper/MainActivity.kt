@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -17,12 +18,16 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Phonelink
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -122,6 +127,7 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(innerPadding)
+                                .consumeWindowInsets(innerPadding)
                         ) {
                             ConnectScreen(
                                 viewModel = viewModel,
@@ -138,6 +144,7 @@ class MainActivity : ComponentActivity() {
                     val isScrcpyFullscreen by scrcpyController?.isFullscreen?.collectAsState() ?: remember { mutableStateOf(false) }
                     val scrcpyState by scrcpyController?.screenState?.collectAsState() ?: remember { mutableStateOf<ScreenState>(ScreenState.Idle) }
                     val showFullscreen = isScrcpyFullscreen && selectedNavIndex == 0 && scrcpyState is ScreenState.Streaming
+                    var showDisconnectConfirmDialog by remember { mutableStateOf(false) }
 
                     val activity = LocalContext.current as? Activity
                     DisposableEffect(showFullscreen) {
@@ -165,14 +172,17 @@ class MainActivity : ComponentActivity() {
                             if (!showFullscreen) {
                                 TopAppBar(
                                     title = {
+                                        val displayIp = if (connectedState.ip.contains(":")) "[${connectedState.ip}]" else connectedState.ip
                                         Text(
-                                            text = "已连接: ${connectedState.deviceName} (${connectedState.ip})",
+                                            text = "已连接: ${connectedState.deviceName} ($displayIp)",
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 16.sp
+                                            fontSize = 16.sp,
+                                            maxLines = 1,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                         )
                                     },
                                     actions = {
-                                        IconButton(onClick = { viewModel.disconnect() }) {
+                                        IconButton(onClick = { showDisconnectConfirmDialog = true }) {
                                             Icon(
                                                 Icons.Default.LinkOff,
                                                 contentDescription = "断开连接",
@@ -207,6 +217,7 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(innerPadding)
+                                .consumeWindowInsets(innerPadding)
                         ) {
                             val controller = viewModel.scrcpyController
                             if (controller != null) {
@@ -231,6 +242,47 @@ class MainActivity : ComponentActivity() {
                                 2 -> TerminalScreen(viewModel = viewModel)
                                 3 -> DeviceInfoScreen(viewModel = viewModel)
                                 4 -> AppAndProcessScreen(viewModel = viewModel)
+                            }
+
+                            // Global Floating Overlay for APK push and install progress
+                            com.yangyx.adbhelper.ui.components.ApkInstallOverlay(
+                                viewModel = viewModel
+                            )
+
+                            // Global Floating Overlay for Remote File Download progress
+                            com.yangyx.adbhelper.ui.components.FileDownloadOverlay(
+                                viewModel = viewModel
+                            )
+
+                            if (showDisconnectConfirmDialog) {
+                                AlertDialog(
+                                    onDismissRequest = { showDisconnectConfirmDialog = false },
+                                    title = { Text("断开 ADB 连接") },
+                                    text = {
+                                        Text(
+                                            text = "确定要断开与设备【${connectedState.deviceName} (${connectedState.ip})】的 ADB 连接吗？断开后当前的投屏与操作会话将立即终止。",
+                                            fontSize = 14.sp
+                                        )
+                                    },
+                                    confirmButton = {
+                                        Button(
+                                            onClick = {
+                                                showDisconnectConfirmDialog = false
+                                                viewModel.disconnect()
+                                            },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = MaterialTheme.colorScheme.error
+                                            )
+                                        ) {
+                                            Text("确认断开")
+                                        }
+                                    },
+                                    dismissButton = {
+                                        OutlinedButton(onClick = { showDisconnectConfirmDialog = false }) {
+                                            Text("取消")
+                                        }
+                                    }
+                                )
                             }
                         }
                     }

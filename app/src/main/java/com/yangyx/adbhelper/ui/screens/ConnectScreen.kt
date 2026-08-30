@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,19 +20,21 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeveloperMode
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Phonelink
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material.icons.filled.Wifi
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -41,18 +44,17 @@ import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.widget.Toast
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -60,6 +62,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -69,13 +72,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yangyx.adbhelper.data.entity.DeviceEntity
 import com.yangyx.adbhelper.ui.AdbViewModel
 import com.yangyx.adbhelper.ui.ConnectionState
+import com.yangyx.adbhelper.ui.models.GroupedDevice
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -87,7 +94,7 @@ fun ConnectScreen(
     modifier: Modifier = Modifier
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
-    val savedDevices by viewModel.savedDevices.collectAsState()
+    val groupedDevices by viewModel.groupedDevices.collectAsState()
 
     val isScanningLan by viewModel.isScanningLan.collectAsState()
     val scanProgress by viewModel.scanProgress.collectAsState()
@@ -101,6 +108,10 @@ fun ConnectScreen(
     var pairIp by remember { mutableStateOf("") }
     var pairPort by remember { mutableStateOf("") }
     var pairCode by remember { mutableStateOf("") }
+
+    var pendingDeleteSingleIp by remember { mutableStateOf<DeviceEntity?>(null) }
+    var pendingDeleteGroup by remember { mutableStateOf<GroupedDevice?>(null) }
+
     val context = LocalContext.current
     val ACTION_USB_PERMISSION = "com.yangyx.adbhelper.USB_PERMISSION"
 
@@ -553,13 +564,35 @@ fun ConnectScreen(
                                         }
                                         Spacer(modifier = Modifier.width(10.dp))
                                         Column(modifier = Modifier.weight(1f)) {
+                                            val isIpv6 = device.ip.contains(":")
+                                            val displayIp = if (isIpv6) "[${device.ip}]:${device.port}" else "${device.ip}:${device.port}"
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                if (isIpv6) {
+                                                    Surface(
+                                                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f),
+                                                        shape = RoundedCornerShape(4.dp),
+                                                        modifier = Modifier.padding(end = 6.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "IPv6",
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                        )
+                                                    }
+                                                }
+                                                Text(
+                                                    text = displayIp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = if (isIpv6) 12.sp else 14.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                             Text(
-                                                text = "${device.ip}:${device.port}",
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 14.sp
-                                            )
-                                            Text(
-                                                text = "ADB 端口 5555 开放 · 点击直接连接",
+                                                text = "ADB 端口 ${device.port} 开放 · 点击直接连接",
                                                 fontSize = 11.sp,
                                                 color = Color(0xFF2E7D32)
                                             )
@@ -584,7 +617,7 @@ fun ConnectScreen(
             }
         }
 
-        // Section Title: Saved & Recent Devices
+        // Section Title: Grouped Devices Management
         item {
             Row(
                 modifier = Modifier
@@ -593,26 +626,27 @@ fun ConnectScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = Icons.Default.History,
-                    contentDescription = "History",
+                    imageVector = Icons.Default.Devices,
+                    contentDescription = "Devices",
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "最近连接过的设备 (${savedDevices.size})",
+                    text = "设备连接管理 (${groupedDevices.size})",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
         }
 
-        if (savedDevices.isEmpty()) {
+        if (groupedDevices.isEmpty()) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     ),
+                    shape = RoundedCornerShape(16.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -622,14 +656,14 @@ fun ConnectScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Wifi,
+                            imageVector = Icons.Default.History,
                             contentDescription = "No Devices",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(40.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "暂无最近连接的历史记录",
+                            text = "暂无连接过的设备历史记录",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 14.sp
                         )
@@ -637,20 +671,98 @@ fun ConnectScreen(
                 }
             }
         } else {
-            items(savedDevices) { device ->
-                DeviceHistoryCard(
-                    device = device,
-                    onConnect = {
-                        ipAddress = device.ipAddress
-                        portText = device.port.toString()
-                        viewModel.connectToDevice(device.ipAddress, device.port)
+            items(
+                items = groupedDevices,
+                key = { it.key }
+            ) { group ->
+                GroupedDeviceCard(
+                    group = group,
+                    onConnectSequentially = {
+                        viewModel.connectDeviceSequentially(group)
                     },
-                    onDelete = {
-                        viewModel.deleteDeviceFromHistory(device.ipAddress)
+                    onConnectSingleIp = { entity ->
+                        ipAddress = entity.ipAddress
+                        portText = entity.port.toString()
+                        viewModel.connectToDevice(entity.ipAddress, entity.port)
+                    },
+                    onMoveUp = { index ->
+                        viewModel.reorderIpInGroup(group, index, index - 1)
+                    },
+                    onMoveDown = { index ->
+                        viewModel.reorderIpInGroup(group, index, index + 1)
+                    },
+                    onDeleteSingleIp = { entity ->
+                        pendingDeleteSingleIp = entity
+                    },
+                    onDeleteGroup = {
+                        pendingDeleteGroup = group
                     }
                 )
             }
         }
+    }
+
+    // Single IP Deletion Double-Confirmation Dialog
+    if (pendingDeleteSingleIp != null) {
+        val item = pendingDeleteSingleIp!!
+        AlertDialog(
+            onDismissRequest = { pendingDeleteSingleIp = null },
+            title = { Text("删除 IP 连接记录") },
+            text = {
+                Text(
+                    text = "确定要从设备历史记录中删除该 IP [${item.ipAddress}:${item.port}] 吗？",
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteSingleIp(item)
+                        pendingDeleteSingleIp = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteSingleIp = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    // Entire Device Deletion Double-Confirmation Dialog
+    if (pendingDeleteGroup != null) {
+        val group = pendingDeleteGroup!!
+        val devDisplay = if (group.serialNo.isNotBlank()) "${group.deviceName} (${group.serialNo})" else group.deviceName
+        AlertDialog(
+            onDismissRequest = { pendingDeleteGroup = null },
+            title = { Text("删除整个设备") },
+            text = {
+                Text(
+                    text = "确定要删除设备 [$devDisplay] 及其名下的全部 ${group.ipRecords.size} 个 IP 连接记录吗？此操作无法撤销。",
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteGroupDevice(group)
+                        pendingDeleteGroup = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("全部删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteGroup = null }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 
     // Wireless Debugging Pairing Dialog
@@ -707,70 +819,262 @@ fun ConnectScreen(
 }
 
 @Composable
-fun DeviceHistoryCard(
-    device: DeviceEntity,
-    onConnect: () -> Unit,
-    onDelete: () -> Unit
+fun GroupedDeviceCard(
+    group: GroupedDevice,
+    onConnectSequentially: () -> Unit,
+    onConnectSingleIp: (DeviceEntity) -> Unit,
+    onMoveUp: (Int) -> Unit,
+    onMoveDown: (Int) -> Unit,
+    onDeleteSingleIp: (DeviceEntity) -> Unit,
+    onDeleteGroup: () -> Unit
 ) {
-    val dateStr = remember(device.lastConnectedTime) {
-        SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(device.lastConnectedTime))
+    val displayName = if (group.serialNo.isNotBlank()) {
+        "${group.deviceName} (${group.serialNo})"
+    } else {
+        group.deviceName
     }
 
     Card(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onConnect() }
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(14.dp)
         ) {
-            Surface(
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                shape = CircleShape,
-                modifier = Modifier.size(44.dp)
+            // Header: Device Title & Sequential Connect & Delete Device
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onConnectSequentially() }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(contentAlignment = Alignment.Center) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = CircleShape,
+                    modifier = Modifier.size(42.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.PhoneAndroid,
+                            contentDescription = "Device",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = displayName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "共 ${group.ipRecords.size} 个网络记录",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1
+                    )
+                }
+
+                FilledTonalButton(
+                    onClick = onConnectSequentially,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.height(34.dp)
+                ) {
                     Icon(
-                        Icons.Default.Phonelink,
-                        contentDescription = "Device",
-                        tint = MaterialTheme.colorScheme.primary
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Sequential Connect",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("依次连接", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                IconButton(
+                    onClick = onDeleteGroup,
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Delete Device",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Spacer(modifier = Modifier.height(8.dp))
 
+            // IP Records List with Order Adjustment and Single IP actions
             Column(
-                modifier = Modifier.weight(1f)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(
-                    text = if (device.name.isNotBlank()) device.name else "Android 设备 (${device.ipAddress})",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "IP: ${device.ipAddress}:${device.port} | 上次连接: $dateStr",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+                group.ipRecords.forEachIndexed { index, item ->
+                    val dateStr = remember(item.lastConnectedTime) {
+                        SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(item.lastConnectedTime))
+                    }
+                    val isIpv6 = item.ipAddress.contains(":")
+                    val displayIp = if (isIpv6) "[${item.ipAddress}]:${item.port}" else "${item.ipAddress}:${item.port}"
 
-            IconButton(onClick = onConnect) {
-                Icon(Icons.Default.PlayArrow, contentDescription = "Quick Connect", tint = MaterialTheme.colorScheme.primary)
-            }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 7.dp)
+                        ) {
+                            // Row 1: Index Badge + IPv6 Chip + IP:Port + Connect Button
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                    shape = RoundedCornerShape(4.dp),
+                                    modifier = Modifier.size(20.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = "${index + 1}",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
 
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                                Spacer(modifier = Modifier.width(6.dp))
+
+                                if (isIpv6) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f),
+                                        shape = RoundedCornerShape(4.dp),
+                                        modifier = Modifier.padding(end = 5.dp)
+                                    ) {
+                                        Text(
+                                            text = "IPv6",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                }
+
+                                Text(
+                                    text = displayIp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = if (isIpv6) 12.sp else 13.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                Spacer(modifier = Modifier.width(6.dp))
+
+                                FilledTonalButton(
+                                    onClick = { onConnectSingleIp(item) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Text("连接", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(3.dp))
+
+                            // Row 2: Last connected time + Reordering arrows (Up/Down) + Delete button
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "上次连接: $dateStr",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                // Move Up
+                                IconButton(
+                                    onClick = { onMoveUp(index) },
+                                    enabled = index > 0,
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowUpward,
+                                        contentDescription = "Move Up",
+                                        tint = if (index > 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(2.dp))
+
+                                // Move Down
+                                IconButton(
+                                    onClick = { onMoveDown(index) },
+                                    enabled = index < group.ipRecords.size - 1,
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDownward,
+                                        contentDescription = "Move Down",
+                                        tint = if (index < group.ipRecords.size - 1) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(4.dp))
+
+                                // Delete Single IP
+                                IconButton(
+                                    onClick = { onDeleteSingleIp(item) },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Delete IP",
+                                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

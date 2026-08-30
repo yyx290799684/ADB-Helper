@@ -145,8 +145,14 @@ class H264StreamDecoder(
                     }
                 } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val newFormat = currentCodec.outputFormat
-                    val outW = if (newFormat.containsKey(MediaFormat.KEY_WIDTH)) newFormat.getInteger(MediaFormat.KEY_WIDTH) else 0
-                    val outH = if (newFormat.containsKey(MediaFormat.KEY_HEIGHT)) newFormat.getInteger(MediaFormat.KEY_HEIGHT) else 0
+                    val cropW = if (newFormat.containsKey("crop-right") && newFormat.containsKey("crop-left")) {
+                        newFormat.getInteger("crop-right") - newFormat.getInteger("crop-left") + 1
+                    } else 0
+                    val cropH = if (newFormat.containsKey("crop-bottom") && newFormat.containsKey("crop-top")) {
+                        newFormat.getInteger("crop-bottom") - newFormat.getInteger("crop-top") + 1
+                    } else 0
+                    val outW = if (cropW > 0) cropW else (if (newFormat.containsKey(MediaFormat.KEY_WIDTH)) newFormat.getInteger(MediaFormat.KEY_WIDTH) else 0)
+                    val outH = if (cropH > 0) cropH else (if (newFormat.containsKey(MediaFormat.KEY_HEIGHT)) newFormat.getInteger(MediaFormat.KEY_HEIGHT) else 0)
                     logger?.invoke("MediaCodec 输出格式变更: ${outW}x${outH} ($newFormat)", LogLevel.INFO)
                     if (outW > 0 && outH > 0) {
                         onVideoSizeChanged?.invoke(outW, outH)
