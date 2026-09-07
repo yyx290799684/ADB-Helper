@@ -46,6 +46,12 @@ interface DeviceDao {
 
     @Update
     suspend fun updateDevices(devices: List<DeviceEntity>)
+
+    @Query("UPDATE devices SET aliasName = :aliasName, iconType = :iconType WHERE serialNo = :serialNo AND serialNo != ''")
+    suspend fun updateAliasAndIconBySerial(serialNo: String, aliasName: String, iconType: String)
+
+    @Query("UPDATE devices SET aliasName = :aliasName, iconType = :iconType WHERE id = :id")
+    suspend fun updateAliasAndIconById(id: Long, aliasName: String, iconType: String)
 }
 
 @Dao

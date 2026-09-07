@@ -772,14 +772,14 @@ class ScrcpyController(
                         val fixedW = newW and 0xFFFE
                         val fixedH = newH and 0xFFFE
                         if (fixedW > 0 && fixedH > 0 && (fixedW != remoteWidth || fixedH != remoteHeight)) {
-                            addLog("检测到视频流动态分辨率变更: ${fixedW}x${fixedH}", LogLevel.INFO)
+                            addLog("检测到视频流动态分辨率/屏幕方向变更: ${fixedW}x${fixedH}", LogLevel.INFO)
                             remoteWidth = fixedW
                             remoteHeight = fixedH
-                            val curDisplayW = if (cfg.maxResolution == 0 && nativeWidth > 0 && !isCamera) nativeWidth else fixedW
-                            val curDisplayH = if (cfg.maxResolution == 0 && nativeHeight > 0 && !isCamera) nativeHeight else fixedH
+                            nativeWidth = fixedW
+                            nativeHeight = fixedH
                             _screenState.value = ScreenState.Streaming(
-                                width = curDisplayW,
-                                height = curDisplayH,
+                                width = fixedW,
+                                height = fixedH,
                                 fps = currentFps,
                                 latencyMs = 12L
                             )
@@ -795,8 +795,8 @@ class ScrcpyController(
                             lastFpsTime = now
                         }
 
-                        val curDisplayW = if (cfg.maxResolution == 0 && nativeWidth > 0 && !isCamera) nativeWidth else remoteWidth
-                        val curDisplayH = if (cfg.maxResolution == 0 && nativeHeight > 0 && !isCamera) nativeHeight else remoteHeight
+                        val curDisplayW = if (remoteWidth > 0) remoteWidth else nativeWidth
+                        val curDisplayH = if (remoteHeight > 0) remoteHeight else nativeHeight
 
                         _screenState.value = ScreenState.Streaming(
                             width = curDisplayW,
@@ -837,6 +837,8 @@ class ScrcpyController(
                                 val adjH = sHeight and 0xFFFE
                                 remoteWidth = adjW
                                 remoteHeight = adjH
+                                nativeWidth = adjW
+                                nativeHeight = adjH
                                 _screenState.value = ScreenState.Streaming(
                                     width = adjW,
                                     height = adjH,
@@ -1502,6 +1504,49 @@ class ScrcpyController(
 
             withContext(Dispatchers.Main) {
                 onResult(if (current >= 0) current else 7, max)
+            }
+        }
+    }
+
+    /**
+     * Request remote device screen rotation (scrcpy rotate or ADB user_rotation)
+     */
+    fun rotateRemoteDevice() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val stream = controlStream
+                if (stream != null && !stream.isClosed) {
+                    stream.write(byteArrayOf(11)) // scrcpy TYPE_ROTATE_DEVICE
+                    addLog("已通过 scrcpy 控制通道发送旋转屏幕指令 (TYPE_ROTATE_DEVICE)", LogLevel.SUCCESS)
+                } else {
+                    val curRotation = connection.executeShell("settings get system user_rotation").trim().toIntOrNull() ?: 0
+                    val nextRotation = (curRotation + 1) % 4
+                    connection.executeShell("settings put system accelerometer_rotation 0")
+                    connection.executeShell("settings put system user_rotation $nextRotation")
+                    addLog("通过 ADB shell 切换被控端屏幕方向为: $nextRotation", LogLevel.SUCCESS)
+                }
+            } catch (e: Exception) {
+                addLog("旋转被控端屏幕失败: ${e.message}", LogLevel.WARN)
+            }
+        }
+    }
+
+    /**
+     * Set explicit remote screen orientation (0=0°, 1=90°, 2=180°, 3=270°, -1=auto)
+     */
+    fun setRemoteOrientation(rotation: Int) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (rotation < 0) {
+                    connection.executeShell("settings put system accelerometer_rotation 1")
+                    addLog("已启用被控端自动重力感应旋转", LogLevel.SUCCESS)
+                } else {
+                    connection.executeShell("settings put system accelerometer_rotation 0")
+                    connection.executeShell("settings put system user_rotation $rotation")
+                    addLog("已设置被控端屏幕固定方向为: ${rotation * 90}°", LogLevel.SUCCESS)
+                }
+            } catch (e: Exception) {
+                addLog("设置被控端屏幕方向失败: ${e.message}", LogLevel.WARN)
             }
         }
     }

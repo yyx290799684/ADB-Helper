@@ -30,9 +30,14 @@ data class GroupedDevice(
     val serialNo: String,
     val deviceName: String,
     val model: String,
+    val aliasName: String = "",
+    val iconType: String = "phone",
     val lastConnectedTime: Long,
     val ipRecords: List<com.yangyx.adbhelper.data.entity.DeviceEntity>
-)
+) {
+    val displayName: String
+        get() = if (aliasName.isNotBlank()) aliasName else deviceName
+}
 
 @Immutable
 data class RemoteAppItem(
@@ -40,7 +45,9 @@ data class RemoteAppItem(
     val appName: String,
     val isSystemApp: Boolean = false,
     val apkPath: String = "",
-    val splitApkPaths: List<String> = emptyList()
+    val splitApkPaths: List<String> = emptyList(),
+    val versionName: String = "",
+    val versionCode: Long = 0L
 )
 
 @Immutable

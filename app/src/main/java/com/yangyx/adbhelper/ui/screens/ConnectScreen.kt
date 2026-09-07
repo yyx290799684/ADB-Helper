@@ -1,6 +1,7 @@
 package com.yangyx.adbhelper.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -28,13 +30,21 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeveloperMode
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Phonelink
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.TabletAndroid
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.WifiTethering
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -79,6 +89,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.yangyx.adbhelper.adb.PairResult
 import com.yangyx.adbhelper.data.entity.DeviceEntity
 import com.yangyx.adbhelper.ui.AdbViewModel
 import com.yangyx.adbhelper.ui.ConnectionState
@@ -108,9 +119,14 @@ fun ConnectScreen(
     var pairIp by remember { mutableStateOf("") }
     var pairPort by remember { mutableStateOf("") }
     var pairCode by remember { mutableStateOf("") }
+    var isPairing by remember { mutableStateOf(false) }
+    var pairResult by remember { mutableStateOf<PairResult?>(null) }
 
     var pendingDeleteSingleIp by remember { mutableStateOf<DeviceEntity?>(null) }
     var pendingDeleteGroup by remember { mutableStateOf<GroupedDevice?>(null) }
+    var editingGroupDevice by remember { mutableStateOf<GroupedDevice?>(null) }
+    var editAliasText by remember { mutableStateOf("") }
+    var selectedIconType by remember { mutableStateOf("phone") }
 
     val context = LocalContext.current
     val ACTION_USB_PERMISSION = "com.yangyx.adbhelper.USB_PERMISSION"
@@ -178,9 +194,8 @@ fun ConnectScreen(
     }
 
     LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 56.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Hero Connection Banner Card
@@ -333,11 +348,18 @@ fun ConnectScreen(
                         }
 
                         OutlinedButton(
-                            onClick = { showPairDialog = true },
+                            onClick = {
+                                if (pairIp.isBlank() && ipAddress.isNotBlank()) {
+                                    pairIp = ipAddress.trim()
+                                }
+                                pairResult = null
+                                isPairing = false
+                                showPairDialog = true
+                            },
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.weight(1f).height(48.dp)
                         ) {
-                            Icon(Icons.Default.DeveloperMode, contentDescription = "Pair", modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.WifiTethering, contentDescription = "Pair", modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("无线配对码", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
                         }
@@ -419,8 +441,9 @@ fun ConnectScreen(
             Card(
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    containerColor = MaterialTheme.colorScheme.surface
                 ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -429,36 +452,40 @@ fun ConnectScreen(
                 Column(
                     modifier = Modifier.padding(16.dp)
                 ) {
+                    // Top Row: Icon + Title + Action Button
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.tertiaryContainer,
-                            shape = CircleShape,
-                            modifier = Modifier.size(40.dp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp)
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.Wifi,
-                                    contentDescription = "LAN Scan",
-                                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                            Surface(
+                                color = MaterialTheme.colorScheme.tertiaryContainer,
+                                shape = CircleShape,
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.Wifi,
+                                        contentDescription = "LAN Scan",
+                                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
+                            Spacer(modifier = Modifier.width(10.dp))
                             Text(
                                 text = "局域网设备自动发现",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "自动检索同一 Wi-Fi 下开放 ADB 端口 (5555) 的设备",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
@@ -470,33 +497,44 @@ fun ConnectScreen(
                                     viewModel.startLanScan()
                                 }
                             },
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (isScanningLan) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                            )
+                            ),
+                            modifier = Modifier.height(34.dp)
                         ) {
                             if (isScanningLan) {
                                 CircularProgressIndicator(
                                     color = MaterialTheme.colorScheme.onError,
-                                    modifier = Modifier.size(16.dp),
+                                    modifier = Modifier.size(14.dp),
                                     strokeWidth = 2.dp
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("停止", fontSize = 13.sp)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("停止", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             } else {
                                 Icon(
                                     imageVector = Icons.Default.Search,
                                     contentDescription = "Scan",
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(15.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("扫描", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("扫描", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             }
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = "自动检索同一 Wi-Fi 下开放 ADB 端口 (5555) 的设备",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 16.sp
+                    )
+
                     if (isScanningLan || scanStatusText.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
                         if (isScanningLan) {
                             LinearProgressIndicator(
                                 progress = scanProgress,
@@ -516,7 +554,7 @@ fun ConnectScreen(
                     }
 
                     if (discoveredDevices.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                         Text(
                             text = "发现可连接设备 (${discoveredDevices.size}):",
                             fontSize = 13.sp,
@@ -530,10 +568,11 @@ fun ConnectScreen(
                             discoveredDevices.forEach { device ->
                                 Card(
                                     colors = CardDefaults.cardColors(
-                                        containerColor = MaterialTheme.colorScheme.surface
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
                                     ),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
                                     shape = RoundedCornerShape(12.dp),
-                                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clickable {
@@ -587,16 +626,19 @@ fun ConnectScreen(
                                                     fontWeight = FontWeight.Bold,
                                                     fontSize = if (isIpv6) 12.sp else 14.sp,
                                                     fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.onSurface,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
                                             }
+                                            Spacer(modifier = Modifier.height(2.dp))
                                             Text(
                                                 text = "ADB 端口 ${device.port} 开放 · 点击直接连接",
                                                 fontSize = 11.sp,
                                                 color = Color(0xFF2E7D32)
                                             )
                                         }
+                                        Spacer(modifier = Modifier.width(8.dp))
                                         Button(
                                             onClick = {
                                                 ipAddress = device.ip
@@ -604,9 +646,10 @@ fun ConnectScreen(
                                                 viewModel.connectToDevice(device.ip, device.port)
                                             },
                                             shape = RoundedCornerShape(8.dp),
-                                            modifier = Modifier.height(36.dp)
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
                                         ) {
-                                            Text("发起连接", fontSize = 12.sp)
+                                            Text("发起连接", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                                         }
                                     }
                                 }
@@ -683,7 +726,12 @@ fun ConnectScreen(
                     onConnectSingleIp = { entity ->
                         ipAddress = entity.ipAddress
                         portText = entity.port.toString()
-                        viewModel.connectToDevice(entity.ipAddress, entity.port)
+                        viewModel.connectToDevice(entity.ipAddress, entity.port, targetAlias = group.aliasName.ifBlank { null })
+                    },
+                    onEditGroup = {
+                        editingGroupDevice = group
+                        editAliasText = group.aliasName
+                        selectedIconType = if (group.iconType.isNotBlank()) group.iconType else "phone"
                     },
                     onMoveUp = { index ->
                         viewModel.reorderIpInGroup(group, index, index - 1)
@@ -699,6 +747,9 @@ fun ConnectScreen(
                     }
                 )
             }
+        }
+        item {
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 
@@ -768,49 +819,406 @@ fun ConnectScreen(
     // Wireless Debugging Pairing Dialog
     if (showPairDialog) {
         AlertDialog(
-            onDismissRequest = { showPairDialog = false },
-            title = { Text("Android 11+ 无线调试配对") },
+            onDismissRequest = {
+                if (!isPairing) {
+                    showPairDialog = false
+                    pairResult = null
+                }
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.WifiTethering,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text("无线调试配对与连接", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
             text = {
-                Column {
-                    Text("请在目标手机的 [开发者选项 -> 无线调试 -> 使用配对码配对设备] 中查看参数", fontSize = 13.sp)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = pairIp,
-                        onValueChange = { pairIp = it },
-                        label = { Text("目标设备 IP") },
-                        placeholder = { Text("192.168.x.x") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = pairPort,
-                        onValueChange = { pairPort = it },
-                        label = { Text("配对服务端口") },
-                        placeholder = { Text("37123") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = pairCode,
-                        onValueChange = { pairCode = it },
-                        label = { Text("6位数配对码") },
-                        placeholder = { Text("123456") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    val currentResult = pairResult
+                    if (currentResult != null) {
+                        when (currentResult) {
+                            is PairResult.Success -> {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(14.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "ADB 调试服务连接成功！",
+                                                fontWeight = FontWeight.Bold,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = currentResult.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
+                                }
+                            }
+                            is PairResult.PairingPortDetected -> {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(14.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.WifiTethering,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.secondary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "配对端口连通成功",
+                                                fontWeight = FontWeight.Bold,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = currentResult.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    }
+                                }
+                            }
+                            is PairResult.Failure -> {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.errorContainer,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(14.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.ErrorOutline,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "连接检测失败",
+                                                fontWeight = FontWeight.Bold,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = MaterialTheme.colorScheme.onErrorContainer
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = currentResult.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                        if (currentResult.suggestion != null) {
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text(
+                                                text = currentResult.suggestion,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if (isPairing) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(38.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                strokeWidth = 3.dp
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "正在连接目标设备并探测服务...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "测试 ADB 授权与无线配对端口，请稍候",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        // Tip Banner
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lightbulb,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "推荐：Android 11+ 可直接使用主页的【直接连接】！只需输入无线调试主页显示的【IP 和端口】，点击连接后远端手机将直接弹出授权框，无需配对码。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 11.5.sp,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedTextField(
+                            value = pairIp,
+                            onValueChange = { pairIp = it },
+                            label = { Text("目标设备 IP 地址") },
+                            placeholder = { Text("例如 192.168.1.100") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = pairPort,
+                            onValueChange = { pairPort = it },
+                            label = { Text("服务端口 (配对端口或连接端口)") },
+                            placeholder = { Text("例如 37123 或 41235") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = pairCode,
+                            onValueChange = { pairCode = it },
+                            label = { Text("6位数配对码 (选填)") },
+                            placeholder = { Text("例如 123456") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val pPort = pairPort.toIntOrNull() ?: 37000
-                    viewModel.pairDevice(pairIp, pPort, pairCode) { success ->
-                        showPairDialog = false
+                val currentResult = pairResult
+                if (currentResult != null) {
+                    when (currentResult) {
+                        is PairResult.Success -> {
+                            Button(
+                                onClick = {
+                                    ipAddress = currentResult.ip
+                                    portText = currentResult.port.toString()
+                                    viewModel.connectToDevice(currentResult.ip, currentResult.port)
+                                    showPairDialog = false
+                                    pairResult = null
+                                }
+                            ) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("立即连接 (${currentResult.port})")
+                            }
+                        }
+                        is PairResult.PairingPortDetected -> {
+                            Button(
+                                onClick = {
+                                    ipAddress = currentResult.ip
+                                    showPairDialog = false
+                                    pairResult = null
+                                    Toast.makeText(context, "已填入 IP：$pairIp，请输入无线调试页面的连接端口直接连接", Toast.LENGTH_LONG).show()
+                                }
+                            ) {
+                                Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("填入 IP 并返回主页连接")
+                            }
+                        }
+                        is PairResult.Failure -> {
+                            Button(onClick = { pairResult = null }) {
+                                Text("重新检测")
+                            }
+                        }
                     }
-                }) {
-                    Text("开始配对")
+                } else if (!isPairing) {
+                    Button(
+                        enabled = pairIp.isNotBlank() && pairPort.isNotBlank(),
+                        onClick = {
+                            val pPort = pairPort.trim().toIntOrNull()
+                            if (pPort == null || pPort !in 1..65535) {
+                                Toast.makeText(context, "请输入有效的端口号 (1~65535)", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            isPairing = true
+                            viewModel.pairDevice(pairIp.trim(), pPort, pairCode.trim()) { res ->
+                                isPairing = false
+                                pairResult = res
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Sensors, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("检测并配对")
+                    }
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showPairDialog = false }) {
+                TextButton(
+                    enabled = !isPairing,
+                    onClick = {
+                        showPairDialog = false
+                        pairResult = null
+                        isPairing = false
+                    }
+                ) {
+                    Text(if (pairResult != null) "关闭" else "取消")
+                }
+            }
+        )
+    }
+
+    // Edit Device Alias & Icon Dialog
+    if (editingGroupDevice != null) {
+        val group = editingGroupDevice!!
+        AlertDialog(
+            onDismissRequest = { editingGroupDevice = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("编辑设备备注与图标", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "原设备: ${group.deviceName} ${if (group.serialNo.isNotBlank()) "(${group.serialNo})" else ""}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    OutlinedTextField(
+                        value = editAliasText,
+                        onValueChange = { editAliasText = it },
+                        label = { Text("设备备注名") },
+                        placeholder = { Text(group.deviceName.ifBlank { "Android 设备" }) },
+                        singleLine = true,
+                        trailingIcon = {
+                            if (editAliasText.isNotEmpty()) {
+                                IconButton(onClick = { editAliasText = "" }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "清除",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = "设备类型图标 (可选 手机、平板、电视、汽车):",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    val iconOptions = listOf(
+                        Triple("phone", "手机", Icons.Default.PhoneAndroid),
+                        Triple("tablet", "平板", Icons.Default.TabletAndroid),
+                        Triple("tv", "电视", Icons.Default.Tv),
+                        Triple("car", "汽车", Icons.Default.DirectionsCar)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        iconOptions.forEach { (typeKey, label, iconVec) ->
+                            val isSelected = selectedIconType.equals(typeKey, ignoreCase = true)
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                border = if (isSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { selectedIconType = typeKey }
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 10.dp, horizontal = 2.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(
+                                        imageVector = iconVec,
+                                        contentDescription = label,
+                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = label,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.updateDeviceAliasAndIcon(group, editAliasText, selectedIconType)
+                        editingGroupDevice = null
+                        Toast.makeText(context, "设备备注及图标已保存", Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    Text("保存")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingGroupDevice = null }) {
                     Text("取消")
                 }
             }
@@ -823,16 +1231,24 @@ fun GroupedDeviceCard(
     group: GroupedDevice,
     onConnectSequentially: () -> Unit,
     onConnectSingleIp: (DeviceEntity) -> Unit,
+    onEditGroup: () -> Unit,
     onMoveUp: (Int) -> Unit,
     onMoveDown: (Int) -> Unit,
     onDeleteSingleIp: (DeviceEntity) -> Unit,
     onDeleteGroup: () -> Unit
 ) {
-    val displayName = if (group.serialNo.isNotBlank()) {
-        "${group.deviceName} (${group.serialNo})"
-    } else {
-        group.deviceName
+    val deviceIcon = when (group.iconType.lowercase()) {
+        "tablet" -> Icons.Default.TabletAndroid
+        "tv" -> Icons.Default.Tv
+        "car" -> Icons.Default.DirectionsCar
+        else -> Icons.Default.PhoneAndroid
     }
+
+    val hasAlias = group.aliasName.isNotBlank()
+    val mainTitle = if (hasAlias) group.aliasName else {
+        if (group.serialNo.isNotBlank()) "${group.deviceName} (${group.serialNo})" else group.deviceName
+    }
+    val subtitle = "共 ${group.ipRecords.size} 个网络记录"
 
     Card(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
@@ -840,6 +1256,7 @@ fun GroupedDeviceCard(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -847,7 +1264,7 @@ fun GroupedDeviceCard(
                 .fillMaxWidth()
                 .padding(14.dp)
         ) {
-            // Header: Device Title & Sequential Connect & Delete Device
+            // Header: Device Icon & Title & Edit & Sequential Connect & Delete Device
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -863,7 +1280,7 @@ fun GroupedDeviceCard(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Default.PhoneAndroid,
+                            imageVector = deviceIcon,
                             contentDescription = "Device",
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(22.dp)
@@ -877,19 +1294,37 @@ fun GroupedDeviceCard(
                     modifier = Modifier.weight(1f)
                 ) {
                     Text(
-                        text = displayName,
+                        text = mainTitle,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "共 ${group.ipRecords.size} 个网络记录",
+                        text = subtitle,
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
+
+                // Edit Button (Custom Alias & Icon)
+                IconButton(
+                    onClick = onEditGroup,
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "编辑设备备注与图标",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(2.dp))
 
                 FilledTonalButton(
                     onClick = onConnectSequentially,
@@ -906,7 +1341,7 @@ fun GroupedDeviceCard(
                     Text("依次连接", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
 
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(2.dp))
 
                 IconButton(
                     onClick = onDeleteGroup,

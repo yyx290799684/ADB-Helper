@@ -1,8 +1,105 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/adb_helper_icon"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 1. Wireless ADB Signals (Centered, top arc gracefully positioned) -->
+    <path
+        android:pathData="M 44,39 A 12,12 0 0,1 64,39"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.2"
+        android:strokeAlpha="0.75"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M 48,42.5 A 7.5,7.5 0 0,1 60,42.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.2"
+        android:strokeAlpha="0.95"
+        android:strokeLineCap="round" />
+
+    <!-- 2. Android Antennas -->
+    <path
+        android:pathData="M 44,50 L 38,40"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M 64,50 L 70,40"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round" />
+
+    <!-- 3. Soft Drop Shadow Behind Android Head -->
+    <path
+        android:pathData="M 35,70 C 33.5,70 33,69.5 33,68 A 21,21 0 0,1 75,68 C 75,69.5 74.5,70 73,70 Z"
+        android:fillColor="#000000"
+        android:fillAlpha="0.25" />
+
+    <!-- 4. Android Robot Head (Crisp Pure White with Ice Cyan Volume) -->
+    <path android:pathData="M 35,68 C 33.5,68 33,67.5 33,66 A 21,21 0 0,1 75,66 C 75,67.5 74.5,68 73,68 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="54"
+                android:startY="45"
+                android:endX="54"
+                android:endY="68"
+                android:startColor="#FFFFFF"
+                android:endColor="#E0F2FE"
+                android:type="linear" />
+        </aapt:attr>
+    </path>
+
+    <!-- 5. Terminal Console inside Android Head -->
+    <!-- Chevron '>' Prompt (Vibrant Royal Cobalt Blue) -->
+    <path
+        android:pathData="M 40,54.5 L 47,59 L 40,63.5"
+        android:strokeColor="#1D4ED8"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- Blinking Cursor '_' (Vibrant Emerald Mint) -->
+    <path
+        android:pathData="M 52,63.5 L 63,63.5"
+        android:strokeColor="#10B981"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round" />
+
+    <!-- Status Indicator Ping (Amber Gold) -->
+    <path
+        android:pathData="M 57.5,56 m -1.8,0 a 1.8,1.8 0 1,0 3.6,0 a 1.8,1.8 0 1,0 -3.6,0"
+        android:fillColor="#F59E0B" />
+
+    <!-- 6. Bottom ADB Hardware / Bridge Links -->
+    <path
+        android:pathData="M 47,68 L 47,71"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeAlpha="0.8" />
+
+    <path
+        android:pathData="M 61,68 L 61,71"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeAlpha="0.8" />
+
+    <!-- USB-C / OTG Connection Socket Base -->
+    <path
+        android:pathData="M 46.5,71 h 15 a 2.5,2.5 0 0,1 2.5,2.5 v 0 a 2.5,2.5 0 0,1 -2.5,2.5 h -15 a 2.5,2.5 0 0,1 -2.5,-2.5 v 0 a 2.5,2.5 0 0,1 2.5,-2.5 z"
+        android:fillColor="#1E3A8A"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.2" />
+
+    <!-- Gold Pin Contact Indicator -->
+    <path
+        android:pathData="M 49.5,73.5 L 58.5,73.5"
+        android:strokeColor="#FACC15"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round" />
+
+</vector>

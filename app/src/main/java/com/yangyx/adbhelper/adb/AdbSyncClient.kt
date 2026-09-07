@@ -350,5 +350,36 @@ class AdbSyncClient(private val connection: AdbConnection) {
         }
         return !res.contains("Permission denied") && !res.contains("failed")
     }
+
+    fun readTextFile(remotePath: String, maxBytes: Int = 2 * 1024 * 1024): String {
+        val baos = java.io.ByteArrayOutputStream()
+        pullFile(remotePath, baos)
+        val bytes = baos.toByteArray()
+        if (bytes.size > maxBytes) {
+            throw Exception("文件过大 (${String.format(java.util.Locale.US, "%.1f", bytes.size / (1024.0 * 1024.0))} MB)，暂不支持在线预览编辑，建议下载后查看")
+        }
+        return String(bytes, Charsets.UTF_8)
+    }
+
+    fun writeTextFile(remotePath: String, content: String) {
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        val bais = java.io.ByteArrayInputStream(bytes)
+        try {
+            pushFile(bais, remotePath)
+        } catch (e: Exception) {
+            val errMsg = e.message ?: ""
+            if (errMsg.contains("Permission denied") || errMsg.contains("FAIL") || isSystemOrRestrictedPath(remotePath)) {
+                connection.executeShell("su -c 'mount -o remount,rw / 2>/dev/null; mount -o remount,rw /system 2>/dev/null'")
+                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                val cmd = "su -c 'echo -n \"$base64\" | base64 -d > \"$remotePath\"'"
+                val res = connection.executeShell(cmd)
+                if (res.contains("Permission denied") || res.contains("failed") || res.contains("not found")) {
+                    throw e
+                }
+            } else {
+                throw e
+            }
+        }
+    }
 }
 

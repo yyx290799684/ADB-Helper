@@ -30,8 +30,10 @@ import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Home
@@ -76,6 +78,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yangyx.adbhelper.adb.RemoteFileItem
 import com.yangyx.adbhelper.ui.AdbViewModel
+import com.yangyx.adbhelper.ui.components.TextEditorDialog
+import com.yangyx.adbhelper.ui.components.isTextFile
 
 private fun isHighRiskSystemDir(path: String): Boolean {
     val clean = path.trim().removeSuffix("/")
@@ -115,6 +119,8 @@ fun FileExplorerScreen(
     var fileToRename by remember { mutableStateOf<RemoteFileItem?>(null) }
     var renameNewName by remember { mutableStateOf("") }
     var fileToDownload by remember { mutableStateOf<RemoteFileItem?>(null) }
+    var fileToEdit by remember { mutableStateOf<RemoteFileItem?>(null) }
+    var fileToPromptOpen by remember { mutableStateOf<RemoteFileItem?>(null) }
 
     var pendingRiskPath by remember { mutableStateOf<String?>(null) }
     var hasConfirmedRootRiskNotice by remember { mutableStateOf(false) }
@@ -350,7 +356,14 @@ fun FileExplorerScreen(
                             onClick = {
                                 if (file.isDirectory) {
                                     requestNavigate(file.path)
+                                } else if (isTextFile(file.name, file.size)) {
+                                    fileToEdit = file
+                                } else {
+                                    fileToPromptOpen = file
                                 }
+                            },
+                            onOpenTextEditor = {
+                                fileToEdit = file
                             },
                             onDownload = {
                                 fileToDownload = file
@@ -558,6 +571,56 @@ fun FileExplorerScreen(
                 }
             )
         }
+
+        // Text Editor Dialog (Preview & Edit text files directly)
+        fileToEdit?.let { target ->
+            TextEditorDialog(
+                file = target,
+                viewModel = viewModel,
+                onDismiss = { fileToEdit = null }
+            )
+        }
+
+        // Binary / Large File Open Confirmation Dialog
+        fileToPromptOpen?.let { target ->
+            AlertDialog(
+                onDismissRequest = { fileToPromptOpen = null },
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Description,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                },
+                title = { Text("打开文件", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text(
+                        text = "【${target.name}】(${formatFileSize(target.size)}) 可能包含二进制或非文本格式数据。您可以尝试以文本方式打开预览，或者将其下载到本地查看。",
+                        fontSize = 14.sp
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        val file = target
+                        fileToPromptOpen = null
+                        fileToEdit = file
+                    }) {
+                        Text("以纯文本预览")
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = {
+                        val file = target
+                        fileToPromptOpen = null
+                        fileToDownload = file
+                        saveFileLauncher.launch(file.name)
+                    }) {
+                        Text("下载到本地")
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -565,6 +628,7 @@ fun FileExplorerScreen(
 fun FileItemRow(
     file: RemoteFileItem,
     onClick: () -> Unit,
+    onOpenTextEditor: () -> Unit,
     onDownload: () -> Unit,
     onRename: () -> Unit,
     onCopy: () -> Unit,
@@ -572,6 +636,7 @@ fun FileItemRow(
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val isText = remember(file.name, file.size) { isTextFile(file.name, file.size) }
 
     Card(
         shape = RoundedCornerShape(12.dp),
@@ -587,15 +652,21 @@ fun FileItemRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                color = if (file.isDirectory) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+                color = if (file.isDirectory) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                else if (isText) MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
+                else MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
                 shape = CircleShape,
                 modifier = Modifier.size(38.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = if (file.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
+                        imageVector = if (file.isDirectory) Icons.Default.Folder
+                        else if (isText) Icons.Default.Description
+                        else Icons.Default.InsertDriveFile,
                         contentDescription = "File Icon",
-                        tint = if (file.isDirectory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                        tint = if (file.isDirectory) MaterialTheme.colorScheme.primary
+                        else if (isText) MaterialTheme.colorScheme.tertiary
+                        else MaterialTheme.colorScheme.secondary,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -613,11 +684,28 @@ fun FileItemRow(
                 )
                 if (!file.isDirectory) {
                     val sizeFormatted = formatFileSize(file.size)
-                    Text(
-                        text = sizeFormatted,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = sizeFormatted,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (isText) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "纯文本",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -637,6 +725,15 @@ fun FileItemRow(
                         onDismissRequest = { showMenu = false }
                     ) {
                         if (!file.isDirectory) {
+                            DropdownMenuItem(
+                                text = { Text("查看/编辑文本") },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    onOpenTextEditor()
+                                }
+                            )
+
                             DropdownMenuItem(
                                 text = { Text("下载到本地") },
                                 leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },

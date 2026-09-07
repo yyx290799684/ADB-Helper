@@ -1,7 +1,10 @@
 package com.yangyx.adbhelper.ui.screens
 
 import android.view.KeyEvent as AndroidKeyEvent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -218,6 +221,9 @@ fun TerminalScreen(
         }
     }
 
+    val isSystemDark = isSystemInDarkTheme()
+    val terminalColors = if (isSystemDark) OneHalfDark else OneHalfLight
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -228,8 +234,9 @@ fun TerminalScreen(
         Card(
             shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(
-                containerColor = Color(0xFF282C34) // One Half Dark Background
+                containerColor = terminalColors.background
             ),
+            border = if (!isSystemDark) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)) else null,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -266,7 +273,7 @@ fun TerminalScreen(
                                 val barOffsetY = scrollOffsetRatio * (totalHeight - barHeight)
 
                                 drawRoundRect(
-                                    color = Color(0xAA5C6370), // One Half Dark Comment/Gutter
+                                    color = if (terminalColors.isDark) Color(0xAA5C6370) else Color(0x66A0A1A7),
                                     topLeft = Offset(size.width - 3.dp.toPx(), barOffsetY),
                                     size = Size(3.dp.toPx(), barHeight),
                                     cornerRadius = CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
@@ -281,7 +288,7 @@ fun TerminalScreen(
                                 val barOffsetX = scrollOffsetRatio * (totalWidth - barWidth)
 
                                 drawRoundRect(
-                                    color = Color(0xAA5C6370),
+                                    color = if (terminalColors.isDark) Color(0xAA5C6370) else Color(0x66A0A1A7),
                                     topLeft = Offset(barOffsetX, size.height - 3.dp.toPx()),
                                     size = Size(barWidth, 3.dp.toPx()),
                                     cornerRadius = CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
@@ -289,8 +296,8 @@ fun TerminalScreen(
                             }
                         }
                 ) {
-                    val annotatedOutput = remember(outputText) {
-                        buildTerminalAnnotatedString(outputText)
+                    val annotatedOutput = remember(outputText, terminalColors) {
+                        buildTerminalAnnotatedString(outputText, terminalColors)
                     }
                     SelectionContainer {
                         Text(
@@ -308,14 +315,15 @@ fun TerminalScreen(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(4.dp)
-                        .background(Color(0xDD21252B), shape = RoundedCornerShape(8.dp))
+                        .background(terminalColors.overlayBar, shape = RoundedCornerShape(8.dp))
+                        .border(0.5.dp, if (terminalColors.isDark) Color(0x22FFFFFF) else Color(0x1F000000), shape = RoundedCornerShape(8.dp))
                         .padding(horizontal = 4.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
                         onClick = { isWrapMode = !isWrapMode },
                         shape = RoundedCornerShape(6.dp),
-                        color = if (isWrapMode) Color(0xFF61AFEF).copy(alpha = 0.22f) else Color(0x1AFFFFFF)
+                        color = if (isWrapMode) terminalColors.blue.copy(alpha = 0.2f) else if (terminalColors.isDark) Color(0x1AFFFFFF) else Color(0x14000000)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -325,14 +333,14 @@ fun TerminalScreen(
                                 Icon(
                                     imageVector = Icons.Default.Check,
                                     contentDescription = "已开启自动换行",
-                                    tint = Color(0xFF61AFEF),
+                                    tint = terminalColors.blue,
                                     modifier = Modifier.size(12.dp)
                                 )
                                 Spacer(modifier = Modifier.width(3.dp))
                             }
                             Text(
                                 text = "自动换行",
-                                color = if (isWrapMode) Color(0xFF61AFEF) else Color(0xFFABB2BF),
+                                color = if (isWrapMode) terminalColors.blue else terminalColors.comment,
                                 fontSize = 10.sp,
                                 fontWeight = if (isWrapMode) FontWeight.Bold else FontWeight.Normal
                             )
@@ -341,7 +349,7 @@ fun TerminalScreen(
 
                     Text(
                         text = "${fontSizeSp.toInt()}pt",
-                        color = Color(0xFF5C6370),
+                        color = terminalColors.comment,
                         fontSize = 10.sp,
                         modifier = Modifier.padding(horizontal = 4.dp)
                     )
@@ -354,7 +362,7 @@ fun TerminalScreen(
                         Icon(
                             imageVector = Icons.Default.ContentCopy,
                             contentDescription = "复制全部输出",
-                            tint = Color(0xFFDCDFE4),
+                            tint = terminalColors.overlayText,
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -365,7 +373,7 @@ fun TerminalScreen(
                         Icon(
                             imageVector = Icons.Default.Clear,
                             contentDescription = "清空控制台",
-                            tint = Color(0xFFDCDFE4),
+                            tint = terminalColors.overlayText,
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -1042,28 +1050,67 @@ fun TerminalScreen(
     }
 }
 
-// One Half Dark Color Palette (from https://github.com/sonph/onehalf)
-private object OneHalfDarkTheme {
-    val Background  = Color(0xFF282C34) // #282c34
-    val Foreground  = Color(0xFFDCDFE4) // #dcdfe4
-    val Red         = Color(0xFFE06C75) // #e06c75
-    val Green       = Color(0xFF98C379) // #98c379
-    val Yellow      = Color(0xFFE5C07B) // #e5c07b
-    val Blue        = Color(0xFF61AFEF) // #61afef
-    val Purple      = Color(0xFFC678DD) // #c678dd
-    val Cyan        = Color(0xFF56B6C2) // #56b6c2
-    val Comment     = Color(0xFF5C6370) // #5c6370
-    val GutterFg    = Color(0xFF4B5263) // #4b5263
-    val Selection   = Color(0xFF474E5D) // #474e5d
-    val BrightWhite = Color(0xFFFFFFFF) // #ffffff
-}
+// One Half Color Palette (from https://github.com/sonph/onehalf)
+private data class TerminalPalette(
+    val background: Color,
+    val foreground: Color,
+    val red: Color,
+    val green: Color,
+    val yellow: Color,
+    val blue: Color,
+    val purple: Color,
+    val cyan: Color,
+    val comment: Color,
+    val gutterFg: Color,
+    val selection: Color,
+    val overlayBar: Color,
+    val overlayText: Color,
+    val brightWhite: Color,
+    val isDark: Boolean
+)
 
-// Precompiled Regular Expressions for One Half Dark Terminal Syntax Highlighting
+private val OneHalfDark = TerminalPalette(
+    background  = Color(0xFF282C34), // #282c34
+    foreground  = Color(0xFFDCDFE4), // #dcdfe4
+    red         = Color(0xFFE06C75), // #e06c75
+    green       = Color(0xFF98C379), // #98c379
+    yellow      = Color(0xFFE5C07B), // #e5c07b
+    blue        = Color(0xFF61AFEF), // #61afef
+    purple      = Color(0xFFC678DD), // #c678dd
+    cyan        = Color(0xFF56B6C2), // #56b6c2
+    comment     = Color(0xFF5C6370), // #5c6370
+    gutterFg    = Color(0xFF4B5263), // #4b5263
+    selection   = Color(0xFF474E5D), // #474e5d
+    overlayBar  = Color(0xDD21252B), // #21252b
+    overlayText = Color(0xFFDCDFE4), // #dcdfe4
+    brightWhite = Color(0xFFFFFFFF), // #ffffff
+    isDark      = true
+)
+
+private val OneHalfLight = TerminalPalette(
+    background  = Color(0xFFFAFAFA), // #fafafa
+    foreground  = Color(0xFF383A42), // #383a42
+    red         = Color(0xFFE45649), // #e45649
+    green       = Color(0xFF50A14F), // #50a14f
+    yellow      = Color(0xFFC18401), // #c18401
+    blue        = Color(0xFF0184BC), // #0184bc
+    purple      = Color(0xFFA626A4), // #a626a4
+    cyan        = Color(0xFF0997B3), // #0997b3
+    comment     = Color(0xFFA0A1A7), // #a0a1a7
+    gutterFg    = Color(0xFF9D9D9F), // #9d9d9f
+    selection   = Color(0xFFE5E5E6), // #e5e5e6
+    overlayBar  = Color(0xEEF0F0F0), // #f0f0f0
+    overlayText = Color(0xFF383A42), // #383a42
+    brightWhite = Color(0xFFFFFFFF), // #ffffff
+    isDark      = false
+)
+
+// Precompiled Regular Expressions for One Half Terminal Syntax Highlighting
 private object TerminalRegexPatterns {
     val AnsiEscape = Regex("\u001B\\[([0-9;]*)m")
     
-    // Shell prompt: e.g. root@android:/sdcard # ls or 130|shell@phone:/ $ ls
-    val PromptFull = Regex("^(?:(\\d+\\|)?([a-zA-Z0-9_\\-\\.]+@[a-zA-Z0-9_\\-\\.]+):([^#$]+)([$#]))\\s*(.*)$")
+    // Shell prompt: e.g. root@android:/sdcard # ls or shell@android /sdcard $ ls or 130|shell@phone:/ $ ls
+    val PromptFull = Regex("^(?:(\\d+\\|)?([a-zA-Z0-9_\\-\\.]+@[a-zA-Z0-9_\\-\\.]+)[\\s:]+([^#$]+)([$#]))\\s*(.*)$")
     val PromptSimple = Regex("^([$#])\\s*(.*)$")
     
     // Logcat format A: 08-29 12:34:56.789 1234 5678 E TagName: Log message
@@ -1106,17 +1153,17 @@ private object TerminalRegexPatterns {
 }
 
 /**
- * Builds annotated string for terminal output using One Half Dark syntax highlighting and ANSI code support.
+ * Builds annotated string for terminal output using One Half syntax highlighting and ANSI code support.
  */
-private fun buildTerminalAnnotatedString(text: String): AnnotatedString {
+private fun buildTerminalAnnotatedString(text: String, theme: TerminalPalette): AnnotatedString {
     return buildAnnotatedString {
         val lines = text.split("\n")
         lines.forEachIndexed { index, line ->
             // Check for ANSI Escape Sequences in the line
             if (TerminalRegexPatterns.AnsiEscape.containsMatchIn(line)) {
-                renderAnsiLine(this, line)
+                renderAnsiLine(this, line, theme)
             } else {
-                renderHighlightedLine(this, line)
+                renderHighlightedLine(this, line, theme)
             }
 
             if (index < lines.size - 1) {
@@ -1127,9 +1174,9 @@ private fun buildTerminalAnnotatedString(text: String): AnnotatedString {
 }
 
 /**
- * Parses and renders lines with standard ANSI Escape Sequences using One Half Dark palette mapping.
+ * Parses and renders lines with standard ANSI Escape Sequences using One Half palette mapping.
  */
-private fun renderAnsiLine(builder: AnnotatedString.Builder, line: String) {
+private fun renderAnsiLine(builder: AnnotatedString.Builder, line: String, theme: TerminalPalette) {
     var currentIndex = 0
     var currentColor: Color? = null
     var isBold = false
@@ -1140,7 +1187,7 @@ private fun renderAnsiLine(builder: AnnotatedString.Builder, line: String) {
         if (textBefore.isNotEmpty()) {
             builder.withStyle(
                 SpanStyle(
-                    color = currentColor ?: OneHalfDarkTheme.Foreground,
+                    color = currentColor ?: theme.foreground,
                     fontWeight = if (isBold) FontWeight.Bold else FontWeight.Normal
                 )
             ) {
@@ -1158,23 +1205,23 @@ private fun renderAnsiLine(builder: AnnotatedString.Builder, line: String) {
             when (code) {
                 0 -> { currentColor = null; isBold = false }
                 1 -> isBold = true
-                30 -> currentColor = OneHalfDarkTheme.Background
-                31 -> currentColor = OneHalfDarkTheme.Red
-                32 -> currentColor = OneHalfDarkTheme.Green
-                33 -> currentColor = OneHalfDarkTheme.Yellow
-                34 -> currentColor = OneHalfDarkTheme.Blue
-                35 -> currentColor = OneHalfDarkTheme.Purple
-                36 -> currentColor = OneHalfDarkTheme.Cyan
-                37 -> currentColor = OneHalfDarkTheme.Foreground
+                30 -> currentColor = if (theme.isDark) theme.background else theme.foreground
+                31 -> currentColor = theme.red
+                32 -> currentColor = theme.green
+                33 -> currentColor = theme.yellow
+                34 -> currentColor = theme.blue
+                35 -> currentColor = theme.purple
+                36 -> currentColor = theme.cyan
+                37 -> currentColor = theme.foreground
                 39 -> currentColor = null
-                90 -> currentColor = OneHalfDarkTheme.Comment
-                91 -> currentColor = OneHalfDarkTheme.Red
-                92 -> currentColor = OneHalfDarkTheme.Green
-                93 -> currentColor = OneHalfDarkTheme.Yellow
-                94 -> currentColor = OneHalfDarkTheme.Blue
-                95 -> currentColor = OneHalfDarkTheme.Purple
-                96 -> currentColor = OneHalfDarkTheme.Cyan
-                97 -> currentColor = OneHalfDarkTheme.BrightWhite
+                90 -> currentColor = theme.comment
+                91 -> currentColor = theme.red
+                92 -> currentColor = theme.green
+                93 -> currentColor = theme.yellow
+                94 -> currentColor = theme.blue
+                95 -> currentColor = theme.purple
+                96 -> currentColor = theme.cyan
+                97 -> currentColor = if (theme.isDark) theme.brightWhite else theme.foreground
             }
         }
         currentIndex = match.range.last + 1
@@ -1184,7 +1231,7 @@ private fun renderAnsiLine(builder: AnnotatedString.Builder, line: String) {
         val remaining = line.substring(currentIndex)
         builder.withStyle(
             SpanStyle(
-                color = currentColor ?: OneHalfDarkTheme.Foreground,
+                color = currentColor ?: theme.foreground,
                 fontWeight = if (isBold) FontWeight.Bold else FontWeight.Normal
             )
         ) {
@@ -1194,9 +1241,9 @@ private fun renderAnsiLine(builder: AnnotatedString.Builder, line: String) {
 }
 
 /**
- * Line & Token-level syntax highlighting based on One Half Dark theme grammar.
+ * Line & Token-level syntax highlighting based on One Half theme grammar.
  */
-private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String) {
+private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String, theme: TerminalPalette) {
     val trimmed = line.trimStart()
 
     // 1. Full Shell Prompt (e.g. root@android:/sdcard # ls -la)
@@ -1212,32 +1259,32 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
         val command = promptMatch.groupValues[5]
 
         if (exitCode.isNotEmpty()) {
-            builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Red, fontWeight = FontWeight.Bold)) {
+            builder.withStyle(SpanStyle(color = theme.red, fontWeight = FontWeight.Bold)) {
                 append(exitCode)
             }
         }
 
         val isRoot = userHost.startsWith("root")
-        val userColor = if (isRoot) OneHalfDarkTheme.Red else OneHalfDarkTheme.Green
+        val userColor = if (isRoot) theme.red else theme.green
         builder.withStyle(SpanStyle(color = userColor, fontWeight = FontWeight.Bold)) {
             append(userHost)
         }
 
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) {
+        builder.withStyle(SpanStyle(color = theme.comment)) {
             append(":")
         }
 
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue, fontWeight = FontWeight.SemiBold)) {
+        builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.SemiBold)) {
             append(path)
         }
 
-        val symbolColor = if (symbol == "#") OneHalfDarkTheme.Red else OneHalfDarkTheme.Yellow
+        val symbolColor = if (symbol == "#") theme.red else theme.yellow
         builder.withStyle(SpanStyle(color = symbolColor, fontWeight = FontWeight.Bold)) {
             append(symbol)
             append(" ")
         }
 
-        renderCommandLineTokens(builder, command)
+        renderCommandLineTokens(builder, command, theme)
         return
     }
 
@@ -1249,13 +1296,13 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
 
         val symbol = simplePromptMatch.groupValues[1]
         val cmd = simplePromptMatch.groupValues[2]
-        val symbolColor = if (symbol == "#") OneHalfDarkTheme.Red else OneHalfDarkTheme.Yellow
+        val symbolColor = if (symbol == "#") theme.red else theme.yellow
 
         builder.withStyle(SpanStyle(color = symbolColor, fontWeight = FontWeight.Bold)) {
             append(symbol)
             append(" ")
         }
-        renderCommandLineTokens(builder, cmd)
+        renderCommandLineTokens(builder, cmd, theme)
         return
     }
 
@@ -1272,11 +1319,11 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
         val tag = logcatTimeMatch.groupValues[5]
         val message = logcatTimeMatch.groupValues[6]
 
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) {
+        builder.withStyle(SpanStyle(color = theme.comment)) {
             append(time)
             append(" ")
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) {
+        builder.withStyle(SpanStyle(color = theme.purple)) {
             append(pid)
             append(" ")
             append(tid)
@@ -1284,25 +1331,25 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
         }
 
         val (levelColor, isBoldLevel) = when (level) {
-            "E", "F", "A" -> OneHalfDarkTheme.Red to true
-            "W" -> OneHalfDarkTheme.Yellow to true
-            "I" -> OneHalfDarkTheme.Cyan to true
-            "D" -> OneHalfDarkTheme.Blue to true
-            else -> OneHalfDarkTheme.Comment to false
+            "E", "F", "A" -> theme.red to true
+            "W" -> theme.yellow to true
+            "I" -> theme.cyan to true
+            "D" -> theme.blue to true
+            else -> theme.comment to false
         }
         builder.withStyle(SpanStyle(color = levelColor, fontWeight = if (isBoldLevel) FontWeight.Bold else FontWeight.Normal)) {
             append(level)
             append(" ")
         }
 
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue, fontWeight = FontWeight.Bold)) {
+        builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.Bold)) {
             append(tag)
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) {
+        builder.withStyle(SpanStyle(color = theme.comment)) {
             append(": ")
         }
 
-        renderGenericTokens(builder, message, defaultColor = if (level == "E" || level == "F") OneHalfDarkTheme.Red else null)
+        renderGenericTokens(builder, message, theme, defaultColor = if (level == "E" || level == "F") theme.red else null)
         return
     }
 
@@ -1318,30 +1365,30 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
         val message = logcatBriefMatch.groupValues[4]
 
         val levelColor = when (level) {
-            "E", "F", "A" -> OneHalfDarkTheme.Red
-            "W" -> OneHalfDarkTheme.Yellow
-            "I" -> OneHalfDarkTheme.Cyan
-            "D" -> OneHalfDarkTheme.Blue
-            else -> OneHalfDarkTheme.Comment
+            "E", "F", "A" -> theme.red
+            "W" -> theme.yellow
+            "I" -> theme.cyan
+            "D" -> theme.blue
+            else -> theme.comment
         }
 
         builder.withStyle(SpanStyle(color = levelColor, fontWeight = FontWeight.Bold)) {
             append(level)
             append("/")
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue, fontWeight = FontWeight.Bold)) {
+        builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.Bold)) {
             append(tag)
         }
         if (pid.isNotEmpty()) {
-            builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) { append("(") }
-            builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) { append(pid) }
-            builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) { append(")") }
+            builder.withStyle(SpanStyle(color = theme.comment)) { append("(") }
+            builder.withStyle(SpanStyle(color = theme.purple)) { append(pid) }
+            builder.withStyle(SpanStyle(color = theme.comment)) { append(")") }
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) {
+        builder.withStyle(SpanStyle(color = theme.comment)) {
             append(": ")
         }
 
-        renderGenericTokens(builder, message, defaultColor = if (level == "E" || level == "F") OneHalfDarkTheme.Red else null)
+        renderGenericTokens(builder, message, theme, defaultColor = if (level == "E" || level == "F") theme.red else null)
         return
     }
 
@@ -1354,18 +1401,18 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
         val key = getPropMatch.groupValues[1]
         val value = getPropMatch.groupValues[2]
 
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) { append("[") }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue, fontWeight = FontWeight.SemiBold)) { append(key) }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) { append("]: [") }
+        builder.withStyle(SpanStyle(color = theme.comment)) { append("[") }
+        builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.SemiBold)) { append(key) }
+        builder.withStyle(SpanStyle(color = theme.comment)) { append("]: [") }
         
         val valColor = when {
-            value.all { it.isDigit() || it == '.' } && value.isNotEmpty() -> OneHalfDarkTheme.Purple
-            value.equals("true", ignoreCase = true) || value.equals("running", ignoreCase = true) -> OneHalfDarkTheme.Green
-            value.equals("false", ignoreCase = true) || value.equals("stopped", ignoreCase = true) -> OneHalfDarkTheme.Red
-            else -> OneHalfDarkTheme.Green
+            value.all { it.isDigit() || it == '.' } && value.isNotEmpty() -> theme.purple
+            value.equals("true", ignoreCase = true) || value.equals("running", ignoreCase = true) -> theme.green
+            value.equals("false", ignoreCase = true) || value.equals("stopped", ignoreCase = true) -> theme.red
+            else -> theme.green
         }
         builder.withStyle(SpanStyle(color = valColor)) { append(value) }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) { append("]") }
+        builder.withStyle(SpanStyle(color = theme.comment)) { append("]") }
         return
     }
 
@@ -1385,33 +1432,33 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
 
         val typeChar = perm[0]
         val typeColor = when (typeChar) {
-            'd' -> OneHalfDarkTheme.Blue
-            'l' -> OneHalfDarkTheme.Cyan
-            'c', 'b' -> OneHalfDarkTheme.Yellow
-            else -> OneHalfDarkTheme.Comment
+            'd' -> theme.blue
+            'l' -> theme.cyan
+            'c', 'b' -> theme.yellow
+            else -> theme.comment
         }
         builder.withStyle(SpanStyle(color = typeColor, fontWeight = FontWeight.Bold)) {
             append(typeChar.toString())
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Green)) {
+        builder.withStyle(SpanStyle(color = theme.green)) {
             append(perm.substring(1))
             append(" ")
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) {
+        builder.withStyle(SpanStyle(color = theme.purple)) {
             append(links)
             append(" ")
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Yellow)) {
+        builder.withStyle(SpanStyle(color = theme.yellow)) {
             append(owner)
             append(" ")
             append(group)
             append(" ")
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) {
+        builder.withStyle(SpanStyle(color = theme.purple)) {
             append(size)
             append(" ")
         }
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) {
+        builder.withStyle(SpanStyle(color = theme.comment)) {
             append(date)
             append(" ")
         }
@@ -1419,23 +1466,23 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
         // File name styling
         when {
             typeChar == 'd' -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue, fontWeight = FontWeight.Bold)) {
+                builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.Bold)) {
                     append(name)
                 }
             }
             typeChar == 'l' && name.contains(" -> ") -> {
                 val parts = name.split(" -> ")
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Cyan)) { append(parts[0]) }
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Yellow)) { append(" -> ") }
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue)) { append(parts.getOrElse(1) { "" }) }
+                builder.withStyle(SpanStyle(color = theme.cyan)) { append(parts[0]) }
+                builder.withStyle(SpanStyle(color = theme.yellow)) { append(" -> ") }
+                builder.withStyle(SpanStyle(color = theme.blue)) { append(parts.getOrElse(1) { "" }) }
             }
             perm.contains("x") -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Green, fontWeight = FontWeight.Bold)) {
+                builder.withStyle(SpanStyle(color = theme.green, fontWeight = FontWeight.Bold)) {
                     append(name)
                 }
             }
             else -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Foreground)) {
+                builder.withStyle(SpanStyle(color = theme.foreground)) {
                     append(name)
                 }
             }
@@ -1445,7 +1492,7 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
 
     // 7. Table Header (ps, top)
     if (TerminalRegexPatterns.TableHeader.matches(trimmed)) {
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Cyan, fontWeight = FontWeight.Bold)) {
+        builder.withStyle(SpanStyle(color = theme.cyan, fontWeight = FontWeight.Bold)) {
             append(line)
         }
         return
@@ -1453,67 +1500,67 @@ private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String
 
     // 8. Context message
     if (trimmed.startsWith("[Context]") || trimmed.startsWith(">>>")) {
-        builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Cyan, fontWeight = FontWeight.SemiBold)) {
+        builder.withStyle(SpanStyle(color = theme.cyan, fontWeight = FontWeight.SemiBold)) {
             append(line)
         }
         return
     }
 
     // 9. Generic Line with Token-based Syntax Highlighting
-    renderGenericTokens(builder, line)
+    renderGenericTokens(builder, line, theme)
 }
 
 /**
  * Tokenizes and renders command line invocation arguments.
  */
-private fun renderCommandLineTokens(builder: AnnotatedString.Builder, commandText: String) {
+private fun renderCommandLineTokens(builder: AnnotatedString.Builder, commandText: String, theme: TerminalPalette) {
     val tokens = commandText.split(" ")
     tokens.forEachIndexed { index, token ->
         when {
             index == 0 -> {
                 // Command binary name
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Green, fontWeight = FontWeight.Bold)) {
+                builder.withStyle(SpanStyle(color = theme.green, fontWeight = FontWeight.Bold)) {
                     append(token)
                 }
             }
             token.startsWith("--") || (token.startsWith("-") && token.length > 1) -> {
                 // Flags / Options
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Cyan)) {
+                builder.withStyle(SpanStyle(color = theme.cyan)) {
                     append(token)
                 }
             }
             token.startsWith("/") || token.startsWith("./") || token.startsWith("~/") -> {
                 // File Path
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue)) {
+                builder.withStyle(SpanStyle(color = theme.blue)) {
                     append(token)
                 }
             }
             token.startsWith("\"") || token.startsWith("'") || token.endsWith("\"") || token.endsWith("'") -> {
                 // Quoted Strings
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Yellow)) {
+                builder.withStyle(SpanStyle(color = theme.yellow)) {
                     append(token)
                 }
             }
             token in listOf("|", ">", ">>", "<", "&&", "||", ";", "&") -> {
                 // Pipes & Operators
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Yellow, fontWeight = FontWeight.Bold)) {
+                builder.withStyle(SpanStyle(color = theme.yellow, fontWeight = FontWeight.Bold)) {
                     append(token)
                 }
             }
             token.startsWith("$") -> {
                 // Environment variables
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Cyan, fontWeight = FontWeight.SemiBold)) {
+                builder.withStyle(SpanStyle(color = theme.cyan, fontWeight = FontWeight.SemiBold)) {
                     append(token)
                 }
             }
             token.all { it.isDigit() || it == '.' || it == ':' || it == '%' } && token.isNotBlank() -> {
                 // Numbers
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) {
+                builder.withStyle(SpanStyle(color = theme.purple)) {
                     append(token)
                 }
             }
             else -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Foreground)) {
+                builder.withStyle(SpanStyle(color = theme.foreground)) {
                     append(token)
                 }
             }
@@ -1525,11 +1572,12 @@ private fun renderCommandLineTokens(builder: AnnotatedString.Builder, commandTex
 }
 
 /**
- * Parses arbitrary text and applies token-level One Half Dark syntax highlighting.
+ * Parses arbitrary text and applies token-level One Half syntax highlighting.
  */
 private fun renderGenericTokens(
     builder: AnnotatedString.Builder,
     text: String,
+    theme: TerminalPalette,
     defaultColor: Color? = null
 ) {
     var lastIndex = 0
@@ -1539,7 +1587,7 @@ private fun renderGenericTokens(
         val range = match.range
         if (range.first > lastIndex) {
             val unmatched = text.substring(lastIndex, range.first)
-            builder.withStyle(SpanStyle(color = defaultColor ?: OneHalfDarkTheme.Foreground)) {
+            builder.withStyle(SpanStyle(color = defaultColor ?: theme.foreground)) {
                 append(unmatched)
             }
         }
@@ -1549,14 +1597,14 @@ private fun renderGenericTokens(
 
         when {
             groups["COMMENT"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Comment)) {
+                builder.withStyle(SpanStyle(color = theme.comment)) {
                     append(token)
                 }
             }
             groups["URL"] != null -> {
                 builder.withStyle(
                     SpanStyle(
-                        color = OneHalfDarkTheme.Blue,
+                        color = theme.blue,
                         textDecoration = TextDecoration.Underline
                     )
                 ) {
@@ -1564,70 +1612,70 @@ private fun renderGenericTokens(
                 }
             }
             groups["IP"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Cyan, fontWeight = FontWeight.SemiBold)) {
+                builder.withStyle(SpanStyle(color = theme.cyan, fontWeight = FontWeight.SemiBold)) {
                     append(token)
                 }
             }
             groups["MAC"] != null || groups["HEX"] != null || groups["UUID"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) {
+                builder.withStyle(SpanStyle(color = theme.purple)) {
                     append(token)
                 }
             }
             groups["PACKAGE"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) {
+                builder.withStyle(SpanStyle(color = theme.purple)) {
                     append("package:")
                 }
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Green)) {
+                builder.withStyle(SpanStyle(color = theme.green)) {
                     append(token.removePrefix("package:"))
                 }
             }
             groups["FLAG"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Cyan)) {
+                builder.withStyle(SpanStyle(color = theme.cyan)) {
                     append(token)
                 }
             }
             groups["PATH"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue)) {
+                builder.withStyle(SpanStyle(color = theme.blue)) {
                     append(token)
                 }
             }
             groups["STRING"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Green)) {
+                builder.withStyle(SpanStyle(color = theme.green)) {
                     append(token)
                 }
             }
             groups["NUMUNIT"] != null || groups["NUMBER"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Purple)) {
+                builder.withStyle(SpanStyle(color = theme.purple)) {
                     append(token)
                 }
             }
             groups["SUCCESS"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Green, fontWeight = FontWeight.Bold)) {
+                builder.withStyle(SpanStyle(color = theme.green, fontWeight = FontWeight.Bold)) {
                     append(token)
                 }
             }
             groups["ERROR"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Red, fontWeight = FontWeight.Bold)) {
+                builder.withStyle(SpanStyle(color = theme.red, fontWeight = FontWeight.Bold)) {
                     append(token)
                 }
             }
             groups["WARN"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Yellow, fontWeight = FontWeight.Bold)) {
+                builder.withStyle(SpanStyle(color = theme.yellow, fontWeight = FontWeight.Bold)) {
                     append(token)
                 }
             }
             groups["KEY"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Blue, fontWeight = FontWeight.SemiBold)) {
+                builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.SemiBold)) {
                     append(token)
                 }
             }
             groups["OP"] != null -> {
-                builder.withStyle(SpanStyle(color = OneHalfDarkTheme.Yellow)) {
+                builder.withStyle(SpanStyle(color = theme.yellow)) {
                     append(token)
                 }
             }
             else -> {
-                builder.withStyle(SpanStyle(color = defaultColor ?: OneHalfDarkTheme.Foreground)) {
+                builder.withStyle(SpanStyle(color = defaultColor ?: theme.foreground)) {
                     append(token)
                 }
             }
@@ -1637,7 +1685,7 @@ private fun renderGenericTokens(
 
     if (lastIndex < text.length) {
         val remaining = text.substring(lastIndex)
-        builder.withStyle(SpanStyle(color = defaultColor ?: OneHalfDarkTheme.Foreground)) {
+        builder.withStyle(SpanStyle(color = defaultColor ?: theme.foreground)) {
             append(remaining)
         }
     }

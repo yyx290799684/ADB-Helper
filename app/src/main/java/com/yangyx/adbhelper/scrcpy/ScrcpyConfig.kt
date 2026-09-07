@@ -1,5 +1,12 @@
 package com.yangyx.adbhelper.scrcpy
 
+enum class HostOrientationMode(val label: String, val shortDesc: String) {
+    AUTO("自动适应", "主控端自动匹配被控端横竖屏"),
+    SENSOR("重力感应", "主控端跟随本机陀螺仪自由旋转"),
+    PORTRAIT("锁定竖屏", "主控端保持竖屏显示"),
+    LANDSCAPE("锁定横屏", "主控端保持横屏全景显示")
+}
+
 data class ScrcpyConfig(
     val bitrate: Int = 4000000,           // Default 4 Mbps
     val maxResolution: Int = 1080,        // Default 1080p (0 = native)
@@ -10,6 +17,8 @@ data class ScrcpyConfig(
     val isPowerOn: Boolean = true,        // Power on at start (启动时点亮屏幕 / false = --no-power-on)
     val isPowerOffOnClose: Boolean = false, // Power off on close (关闭时息屏 --power-off-on-close)
     val isAudioEnabled: Boolean = false,  // Audio forwarding toggle
+    val autoRotateHost: Boolean = true,   // Auto rotate host screen to follow remote orientation
+    val hostOrientationMode: HostOrientationMode = HostOrientationMode.AUTO, // Orientation strategy
     val virtualDisplayWidth: Int = 0,     // Virtual display width (0 = disabled)
     val virtualDisplayHeight: Int = 0,    // Virtual display height
     val launchPackageOnVirtualDisplay: String = "", // Package to launch on virtual display

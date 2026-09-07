@@ -89,6 +89,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -231,7 +232,9 @@ fun AppAndProcessScreen(
                             (showSystemApps || !app.isSystemApp) &&
                                     (searchQuery.isBlank() ||
                                             app.packageName.contains(searchQuery, ignoreCase = true) ||
-                                            app.appName.contains(searchQuery, ignoreCase = true))
+                                            app.appName.contains(searchQuery, ignoreCase = true) ||
+                                            app.versionName.contains(searchQuery, ignoreCase = true) ||
+                                            (app.versionCode > 0 && app.versionCode.toString().contains(searchQuery)))
                         }
                     }
                 }
@@ -1112,6 +1115,43 @@ fun AppItemCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1
                 )
+                if (app.versionName.isNotBlank() || app.versionCode > 0L) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (app.versionName.isNotBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                            ) {
+                                Text(
+                                    text = "v${app.versionName}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        if (app.versionCode > 0L) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Text(
+                                    text = "(${app.versionCode})",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.width(8.dp))
@@ -1233,9 +1273,10 @@ fun ProcessItemCard(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.Top
         ) {
+            // Icon
             Surface(
                 color = if (proc.isUserApp) {
                     MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
@@ -1243,7 +1284,9 @@ fun ProcessItemCard(
                     MaterialTheme.colorScheme.surfaceVariant
                 },
                 shape = CircleShape,
-                modifier = Modifier.size(40.dp)
+                modifier = Modifier
+                    .padding(top = 2.dp)
+                    .size(40.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
@@ -1254,15 +1297,24 @@ fun ProcessItemCard(
                 }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            // Main Info Column
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                // Row 1: App Title & Type Tag
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Text(
                         text = displayName,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
@@ -1276,7 +1328,7 @@ fun ProcessItemCard(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                             )
                         }
                     } else if (proc.isSystemApp) {
@@ -1289,37 +1341,89 @@ fun ProcessItemCard(
                                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                             )
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(2.dp))
-
-                val subInfo = buildString {
-                    if (proc.packageName.isNotEmpty() && proc.packageName != displayName) {
-                        append(proc.packageName)
-                        append(" • ")
+                // Row 2: Package Name & Process Name (Dedicated line, never crowded)
+                val showPkg = proc.packageName.isNotEmpty() && proc.packageName != displayName
+                val showProcName = proc.name.isNotEmpty() && proc.name != displayName && proc.name != proc.packageName
+                if (showPkg || showProcName) {
+                    val detailText = when {
+                        showPkg && showProcName -> "${proc.packageName} (${proc.name})"
+                        showPkg -> proc.packageName
+                        else -> proc.name
                     }
-                    append("PID: ")
-                    append(proc.pid)
-                    if (proc.memUsage.isNotEmpty() && proc.memUsage != "0") {
-                        append(" • 内存: ")
-                        append(proc.memUsage)
-                    }
+                    Text(
+                        text = detailText,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
 
-                Text(
-                    text = subInfo,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
-                )
+                // Row 3: Metrics Badges (PID, Memory, CPU)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(top = 2.dp)
+                ) {
+                    // PID Badge
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = "PID: ${proc.pid}",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+
+                    // Memory Badge
+                    if (proc.memUsage.isNotEmpty() && proc.memUsage != "0") {
+                        Surface(
+                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "内存: ${proc.memUsage}",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    // CPU Badge (if available)
+                    if (proc.cpuUsage.isNotEmpty() && proc.cpuUsage != "0%" && proc.cpuUsage != "0.0%") {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "CPU: ${proc.cpuUsage}",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.width(8.dp))
 
+            // Action Button: Right aligned
             OutlinedButton(
                 onClick = onKill,
                 shape = RoundedCornerShape(8.dp),
@@ -1327,18 +1431,20 @@ fun ProcessItemCard(
                     contentColor = MaterialTheme.colorScheme.error
                 ),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp)
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .align(Alignment.CenterVertically)
+                    .height(32.dp)
             ) {
                 Icon(
                     Icons.Default.Stop,
                     contentDescription = null,
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(15.dp),
                     tint = MaterialTheme.colorScheme.error
                 )
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(3.dp))
                 Text(
-                    text = if (isApp) "停止应用" else "结束",
+                    text = if (isApp) "停止" else "结束",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.error

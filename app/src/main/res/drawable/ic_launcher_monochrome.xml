@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Top Wireless Arcs -->
+    <path
+        android:pathData="M 44,39 A 12,12 0 0,1 64,39"
+        android:strokeColor="#000000"
+        android:strokeWidth="2.2"
+        android:strokeAlpha="0.6"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M 48,42.5 A 7.5,7.5 0 0,1 60,42.5"
+        android:strokeColor="#000000"
+        android:strokeWidth="2.2"
+        android:strokeAlpha="0.85"
+        android:strokeLineCap="round" />
+
+    <!-- Antennas -->
+    <path
+        android:pathData="M 44,50 L 38,40"
+        android:strokeColor="#000000"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M 64,50 L 70,40"
+        android:strokeColor="#000000"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round" />
+
+    <!-- Android Head (Solid for theme tinting) -->
+    <path
+        android:pathData="M 35,68 C 33.5,68 33,67.5 33,66 A 21,21 0 0,1 75,66 C 75,67.5 74.5,68 73,68 Z"
+        android:fillColor="#000000" />
+
+    <!-- Chevron & Cursor Cutouts in Monochrome -->
+    <path
+        android:pathData="M 40,54.5 L 47,59 L 40,63.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:pathData="M 52,63.5 L 63,63.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round" />
+
+    <path
+        android:pathData="M 57.5,56 m -1.8,0 a 1.8,1.8 0 1,0 3.6,0 a 1.8,1.8 0 1,0 -3.6,0"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Bottom Bridge Base -->
+    <path
+        android:pathData="M 46.5,71 h 15 a 2.5,2.5 0 0,1 2.5,2.5 v 0 a 2.5,2.5 0 0,1 -2.5,2.5 h -15 a 2.5,2.5 0 0,1 -2.5,-2.5 v 0 a 2.5,2.5 0 0,1 2.5,-2.5 z"
+        android:fillColor="#000000"
+        android:strokeColor="#000000"
+        android:strokeWidth="1.2" />
+
+</vector>

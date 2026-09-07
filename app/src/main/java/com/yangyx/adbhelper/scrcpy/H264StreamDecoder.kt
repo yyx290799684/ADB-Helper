@@ -43,6 +43,9 @@ class H264StreamDecoder(
         try {
             val format = MediaFormat.createVideoFormat(mimeType, width, height)
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024)
+            val maxDim = maxOf(width, height, 3840)
+            format.setInteger(MediaFormat.KEY_MAX_WIDTH, maxDim)
+            format.setInteger(MediaFormat.KEY_MAX_HEIGHT, maxDim)
             format.setInteger(MediaFormat.KEY_PRIORITY, 0) // Realtime priority
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {

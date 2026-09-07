@@ -2,6 +2,7 @@ package com.yangyx.adbhelper.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,6 +31,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -60,12 +62,12 @@ fun DeviceInfoScreen(
     modifier: Modifier = Modifier
 ) {
     val info by viewModel.systemInfo.collectAsState()
+    val isRefreshing by viewModel.isRefreshingSystemInfo.collectAsState()
     var pendingRebootOption by remember { mutableStateOf<RebootOption?>(null) }
 
     LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 48.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item(key = "header", contentType = "header") {
@@ -79,10 +81,21 @@ fun DeviceInfoScreen(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                Button(onClick = { viewModel.refreshSystemInfo() }) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                Button(
+                    onClick = { viewModel.refreshSystemInfo() },
+                    enabled = !isRefreshing
+                ) {
+                    if (isRefreshing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                    }
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("刷新状态")
+                    Text(if (isRefreshing) "刷新中..." else "刷新状态")
                 }
             }
         }
@@ -212,7 +225,26 @@ fun DeviceInfoScreen(
                     icon = Icons.Default.SdStorage,
                     iconTint = Color(0xFFD97706)
                 ) {
-                    InfoRow("已用存储", "${info.storageUsedGb} GB / ${info.storageTotalGb} GB")
+                    val storageProgress = (info.storageUsedGb / info.storageTotalGb).coerceIn(0f, 1f)
+                    val freeGb = (info.storageTotalGb - info.storageUsedGb).coerceAtLeast(0f)
+                    val usedGbFormatted = String.format(java.util.Locale.US, "%.1f", info.storageUsedGb)
+                    val totalGbFormatted = String.format(java.util.Locale.US, "%.1f", info.storageTotalGb)
+                    val freeGbFormatted = String.format(java.util.Locale.US, "%.1f", freeGb)
+                    Text(
+                        text = "已用空间: $usedGbFormatted GB / $totalGbFormatted GB (${(storageProgress * 100).toInt()}%)",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        progress = { storageProgress },
+                        color = Color(0xFFD97706),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    InfoRow("剩余可用", "$freeGbFormatted GB")
                 }
             }
         }

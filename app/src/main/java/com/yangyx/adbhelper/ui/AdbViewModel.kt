@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.yangyx.adbhelper.adb.AdbConnection
 import com.yangyx.adbhelper.adb.AdbPairer
+import com.yangyx.adbhelper.adb.PairResult
 import com.yangyx.adbhelper.adb.AdbSyncClient
 import com.yangyx.adbhelper.adb.DiscoveredAdbDevice
 import com.yangyx.adbhelper.adb.LanScanner
@@ -26,6 +27,7 @@ import com.yangyx.adbhelper.ui.models.SystemInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
@@ -98,7 +100,13 @@ data class ApkInstallTask(
 class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application)
-    private val repository = AdbRepository(db.deviceDao(), db.commandDao())
+    private val repository = AdbRepository(db.deviceDao(), db.commandDao(), application)
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.checkAndRestoreBackupIfNeeded()
+        }
+    }
 
     val savedDevices: StateFlow<List<DeviceEntity>> = repository.allDevices
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), emptyList())
@@ -122,6 +130,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             )
             val bestName = sortedIps.firstOrNull { it.name.isNotBlank() }?.name ?: "Android 设备"
             val bestModel = sortedIps.firstOrNull { it.model.isNotBlank() }?.model ?: ""
+            val bestAlias = sortedIps.firstOrNull { it.aliasName.isNotBlank() }?.aliasName ?: ""
+            val bestIcon = sortedIps.firstOrNull { it.iconType.isNotBlank() }?.iconType ?: "phone"
             val latestTime = sortedIps.maxOfOrNull { it.lastConnectedTime } ?: 0L
 
             groups.add(
@@ -130,6 +140,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     serialNo = serial,
                     deviceName = bestName,
                     model = bestModel,
+                    aliasName = bestAlias,
+                    iconType = bestIcon,
                     lastConnectedTime = latestTime,
                     ipRecords = sortedIps
                 )
@@ -143,6 +155,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     serialNo = "",
                     deviceName = if (device.name.isNotBlank()) device.name else "Android 设备 (${device.ipAddress})",
                     model = device.model,
+                    aliasName = device.aliasName,
+                    iconType = if (device.iconType.isNotBlank()) device.iconType else "phone",
                     lastConnectedTime = device.lastConnectedTime,
                     ipRecords = listOf(device)
                 )
@@ -200,7 +214,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     val fileClipboard: StateFlow<FileClipboard?> = _fileClipboard.asStateFlow()
 
     // Terminal state
-    private val _terminalOutput = MutableStateFlow("ADB Helper Terminal\n")
+    private val _terminalOutput = MutableStateFlow("ADB Helper Terminal\nReady for input...\n\nshell@android:/ $ ")
     val terminalOutput: StateFlow<String> = _terminalOutput.asStateFlow()
 
     private val _isRootMode = MutableStateFlow(false)
@@ -235,7 +249,17 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setRootMode(enabled: Boolean) {
         _isRootMode.value = enabled
-        _terminalOutput.value += if (enabled) "\n# 已切换至 Root 权限模式 (#)\n" else "\n$ 已切换至普通用户模式 ($)\n"
+        val userLabel = if (enabled) "root" else "shell"
+        val promptChar = if (enabled) "#" else "$"
+        val currentPath = _terminalPath.value
+        val out = _terminalOutput.value
+        val currentPrompt = "$userLabel@android:$currentPath $promptChar "
+        val notice = if (enabled) "\n[Context] 已切换至 Root 权限模式 (#)\n" else "\n[Context] 已切换至普通用户模式 ($)\n"
+        _terminalOutput.value = if (out.endsWith("\n") || out.isEmpty()) {
+            "$out$notice$currentPrompt"
+        } else {
+            "$out\n$notice$currentPrompt"
+        }
     }
 
     private fun loadCommandHistoryFromPrefs(): List<String> {
@@ -340,6 +364,11 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     // System Monitor state
     private val _systemInfo = MutableStateFlow(SystemInfo())
     val systemInfo: StateFlow<SystemInfo> = _systemInfo.asStateFlow()
+
+    private val _isRefreshingSystemInfo = MutableStateFlow(false)
+    val isRefreshingSystemInfo: StateFlow<Boolean> = _isRefreshingSystemInfo.asStateFlow()
+
+    private var cachedStaticInfo: SystemInfo? = null
 
     // App & Process Manager state
     private var refreshAppsJob: Job? = null
@@ -479,6 +508,49 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         return false
     }
 
+    // Connection Concurrency & Session Management
+    private var activeConnectJob: Job? = null
+    private var currentConnectId: Long = 0L
+    private var pendingAttemptConnection: AdbConnection? = null
+
+    private fun cancelPreviousConnectTask() {
+        activeConnectJob?.cancel()
+        activeConnectJob = null
+        try {
+            pendingAttemptConnection?.disconnect()
+        } catch (_: Exception) {}
+        pendingAttemptConnection = null
+    }
+
+    /**
+     * 清理上一台设备遗留的终端内容、路径、进程、应用、系统信息及后台临时任务
+     */
+    fun resetDeviceSessionStates(ip: String, deviceName: String) {
+        val header = if (ip.isNotBlank() || deviceName.isNotBlank()) {
+            "=== ADB Helper 终端 ===\n已连接设备: ${deviceName.ifBlank { "Android 设备" }} ($ip)\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+        } else {
+            "ADB Helper Terminal\nReady for input...\n\nshell@android:/ $ "
+        }
+        _terminalOutput.value = header
+        _terminalPath.value = "/"
+        _isRootMode.value = false
+        cachedStaticInfo = null
+        _isRefreshingSystemInfo.value = false
+        _systemInfo.value = SystemInfo()
+        _installedApps.value = emptyList()
+        _isAppLoading.value = false
+        _appLoadingProgress.value = 0f
+        _appLoadingStatus.value = ""
+        _appDiagnosisLogs.value = "设备已切换，点击刷新按钮可加载新设备的应用列表并生成诊断日志。"
+        _runningProcesses.value = emptyList()
+        _remoteFiles.value = emptyList()
+        _currentRemotePath.value = "/sdcard"
+        _isFileLoading.value = false
+        _fileClipboard.value = null
+        _currentInstallTask.value = null
+        _currentDownloadTask.value = null
+    }
+
     private suspend fun isPortReachable(ip: String, port: Int, timeoutMs: Int = 1000): Boolean = kotlinx.coroutines.withContext(Dispatchers.IO) {
         try {
             java.net.Socket().use { socket ->
@@ -496,17 +568,26 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         serialNo: String,
         name: String,
         model: String
-    ) {
+    ): String {
         val existing = repository.getDeviceByIpAndPort(ip, port)
         val allDevices = repository.getAllDevicesDirect()
         val groupDevices = if (serialNo.isNotBlank()) allDevices.filter { it.serialNo == serialNo } else emptyList()
         val minGroupSortOrder = groupDevices.minOfOrNull { it.sortOrder } ?: allDevices.minOfOrNull { it.sortOrder } ?: 0
+
+        val existingAlias = existing?.aliasName?.ifBlank { null }
+            ?: groupDevices.firstOrNull { it.aliasName.isNotBlank() }?.aliasName
+            ?: ""
+        val existingIcon = existing?.iconType?.ifBlank { null }
+            ?: groupDevices.firstOrNull { it.iconType.isNotBlank() }?.iconType
+            ?: "phone"
 
         val deviceToSave = if (existing != null) {
             existing.copy(
                 serialNo = if (serialNo.isNotEmpty()) serialNo else existing.serialNo,
                 name = if (name.isNotEmpty()) name else existing.name,
                 model = if (model.isNotEmpty()) model else existing.model,
+                aliasName = existingAlias,
+                iconType = existingIcon,
                 lastConnectedTime = System.currentTimeMillis(),
                 sortOrder = minGroupSortOrder - 1
             )
@@ -517,27 +598,69 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 port = port,
                 name = name,
                 model = model,
+                aliasName = existingAlias,
+                iconType = existingIcon,
                 lastConnectedTime = System.currentTimeMillis(),
                 sortOrder = minGroupSortOrder - 1
             )
         }
         repository.saveDevice(deviceToSave)
+        return if (existingAlias.isNotBlank()) existingAlias else name
     }
 
-    // Connect to target IP & Port
-    fun connectToDevice(ip: String, port: Int = 5555) {
+    fun updateDeviceAliasAndIcon(group: GroupedDevice, aliasName: String, iconType: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            _connectionState.value = ConnectionState.Connecting("正在连接 $ip:$port ...")
+            val primaryId = group.ipRecords.firstOrNull()?.id ?: 0L
+            val trimmedAlias = aliasName.trim()
+            repository.updateDeviceAliasAndIcon(group.serialNo, primaryId, trimmedAlias, iconType)
+
+            // 如果当前正处于已连接状态，且当前连接属于该设备，同步将标题与前台服务名称更新为重命名后的名字
+            val currentState = _connectionState.value
+            if (currentState is ConnectionState.Connected) {
+                val matchesCurrent = group.ipRecords.any { it.ipAddress == currentState.ip } ||
+                        (group.serialNo.isNotBlank() && cachedStaticInfo?.serialNo == group.serialNo)
+                if (matchesCurrent) {
+                    val newTitle = if (trimmedAlias.isNotBlank()) trimmedAlias else group.deviceName
+                    lastConnectedDeviceName = newTitle
+                    _connectionState.value = currentState.copy(deviceName = newTitle)
+                    com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), newTitle, currentState.ip)
+                }
+            }
+        }
+    }
+
+    // Connect to target IP & Port with concurrency conflict avoidance and state cleanup
+    fun connectToDevice(ip: String, port: Int = 5555, targetAlias: String? = null) {
+        cancelPreviousConnectTask()
+        val thisConnectId = ++currentConnectId
+
+        activeConnectJob = viewModelScope.launch(Dispatchers.IO) {
+            val connectingTitle = if (!targetAlias.isNullOrBlank()) targetAlias else "$ip:$port"
+            _connectionState.value = ConnectionState.Connecting("正在连接 $connectingTitle ...")
+            var conn: AdbConnection? = null
             try {
-                lastConnectedIp = ip
-                lastConnectedPort = port
-                val conn = AdbConnection(ip, port, getApplication())
+                conn = AdbConnection(ip, port, getApplication())
+                pendingAttemptConnection = conn
                 conn.connect(10000) { status ->
-                    _connectionState.value = ConnectionState.Connecting(status)
+                    if (thisConnectId == currentConnectId && coroutineContext.isActive) {
+                        _connectionState.value = ConnectionState.Connecting(status)
+                    }
                 }
 
+                if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    conn.disconnect()
+                    return@launch
+                }
+
+                activeConnection?.disconnect()
                 activeConnection = conn
+                pendingAttemptConnection = null
                 scrcpyController = ScrcpyController(conn, viewModelScope, getApplication())
+                lastConnectedIp = ip
+                lastConnectedPort = port
+
+                // 重置上一台设备的终端输出、文件、进程、应用等数据
+                resetDeviceSessionStates(ip, "正在获取设备信息...")
 
                 // Fetch serial number and device info
                 val rawSerial = conn.executeShell("getprop ro.serialno").trim()
@@ -557,10 +680,14 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     model.isNotEmpty() -> "$brand $model".trim()
                     else -> conn.deviceBanner
                 }
-                lastConnectedDeviceName = deviceName
 
-                // Save to recent devices database with serial grouping support
-                saveDeviceRecord(
+                if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    conn.disconnect()
+                    return@launch
+                }
+
+                // Save to recent devices database with serial grouping support and retrieve alias
+                val effectiveDisplayName = saveDeviceRecord(
                     ip = ip,
                     port = port,
                     serialNo = serialNo,
@@ -568,8 +695,17 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     model = if (marketName.isNotEmpty()) "$marketName ($model)" else model
                 )
 
-                _connectionState.value = ConnectionState.Connected(ip, deviceName)
-                com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), deviceName, ip)
+                val finalTitle = when {
+                    !targetAlias.isNullOrBlank() -> targetAlias
+                    effectiveDisplayName.isNotBlank() -> effectiveDisplayName
+                    else -> deviceName
+                }
+
+                lastConnectedDeviceName = finalTitle
+                _terminalOutput.value = "=== ADB Helper 终端 ===\n已连接设备: $finalTitle ($ip:$port)\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+
+                _connectionState.value = ConnectionState.Connected(ip, finalTitle)
+                com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), finalTitle, ip)
 
                 // Initialize default data
                 refreshFiles()
@@ -577,25 +713,43 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 refreshProcesses()
 
             } catch (e: Exception) {
+                if (e is CancellationException || thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    return@launch
+                }
                 _connectionState.value = ConnectionState.Error(e.message ?: "连接超时或拒绝连接")
+            } finally {
+                if (pendingAttemptConnection == conn) {
+                    pendingAttemptConnection = null
+                }
             }
         }
     }
 
-    // Connect to device trying all saved IPs sequentially (with 1s port test timeout)
+    // Connect to device trying all saved IPs sequentially (with 1s port test timeout & cancellation guard)
     fun connectDeviceSequentially(group: GroupedDevice) {
         if (group.ipRecords.isEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val displayName = if (group.serialNo.isNotBlank()) "${group.deviceName} (${group.serialNo})" else group.deviceName
+        cancelPreviousConnectTask()
+        val thisConnectId = ++currentConnectId
+
+        activeConnectJob = viewModelScope.launch(Dispatchers.IO) {
+            val displayName = group.displayName.ifBlank {
+                if (group.serialNo.isNotBlank()) "${group.deviceName} (${group.serialNo})" else group.deviceName
+            }
             _connectionState.value = ConnectionState.Connecting("准备连接设备: $displayName ...")
             var isConnected = false
             val total = group.ipRecords.size
 
             for ((idx, item) in group.ipRecords.withIndex()) {
+                if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    return@launch
+                }
                 val target = "${item.ipAddress}:${item.port}"
                 _connectionState.value = ConnectionState.Connecting("(${idx + 1}/$total) 正在检测端口 $target ...")
 
                 val reachable = isPortReachable(item.ipAddress, item.port, 1000)
+                if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    return@launch
+                }
                 if (!reachable) {
                     _connectionState.value = ConnectionState.Connecting("(${idx + 1}/$total) 端口 $target 不可达(超时1s)，尝试下一个...")
                     kotlinx.coroutines.delay(200)
@@ -603,16 +757,29 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 _connectionState.value = ConnectionState.Connecting("(${idx + 1}/$total) 端口开放，正在握手连接 $target ...")
+                var conn: AdbConnection? = null
                 try {
-                    lastConnectedIp = item.ipAddress
-                    lastConnectedPort = item.port
-                    val conn = AdbConnection(item.ipAddress, item.port, getApplication())
+                    conn = AdbConnection(item.ipAddress, item.port, getApplication())
+                    pendingAttemptConnection = conn
                     conn.connect(6000) { status ->
-                        _connectionState.value = ConnectionState.Connecting("[$target] $status")
+                        if (thisConnectId == currentConnectId && coroutineContext.isActive) {
+                            _connectionState.value = ConnectionState.Connecting("[$target] $status")
+                        }
                     }
 
+                    if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                        conn.disconnect()
+                        return@launch
+                    }
+
+                    activeConnection?.disconnect()
                     activeConnection = conn
+                    pendingAttemptConnection = null
                     scrcpyController = ScrcpyController(conn, viewModelScope, getApplication())
+                    lastConnectedIp = item.ipAddress
+                    lastConnectedPort = item.port
+
+                    resetDeviceSessionStates(item.ipAddress, "正在获取设备信息...")
 
                     val rawSerial = conn.executeShell("getprop ro.serialno").trim()
                     val serialNo = if (rawSerial.isNotEmpty() && rawSerial != "unknown") rawSerial else {
@@ -627,18 +794,30 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         model.isNotEmpty() -> "$brand $model".trim()
                         else -> conn.deviceBanner
                     }
-                    lastConnectedDeviceName = devName
 
-                    saveDeviceRecord(
+                    if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                        conn.disconnect()
+                        return@launch
+                    }
+
+                    val savedAlias = saveDeviceRecord(
                         ip = item.ipAddress,
                         port = item.port,
                         serialNo = serialNo,
                         name = devName,
                         model = if (marketName.isNotEmpty()) "$marketName ($model)" else model
                     )
+                    val finalDisplayName = when {
+                        group.aliasName.isNotBlank() -> group.aliasName
+                        savedAlias.isNotBlank() -> savedAlias
+                        else -> devName
+                    }
 
-                    _connectionState.value = ConnectionState.Connected(item.ipAddress, devName)
-                    com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), devName, item.ipAddress)
+                    lastConnectedDeviceName = finalDisplayName
+                    _terminalOutput.value = "=== ADB Helper 终端 ===\n已连接设备: $finalDisplayName (${item.ipAddress}:${item.port})\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+
+                    _connectionState.value = ConnectionState.Connected(item.ipAddress, finalDisplayName)
+                    com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), finalDisplayName, item.ipAddress)
 
                     refreshFiles()
                     refreshSystemInfo()
@@ -646,9 +825,20 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     isConnected = true
                     break
                 } catch (e: Exception) {
+                    if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                        return@launch
+                    }
                     _connectionState.value = ConnectionState.Connecting("[$target] 连接失败: ${e.message}，尝试下一个...")
                     kotlinx.coroutines.delay(200)
+                } finally {
+                    if (pendingAttemptConnection == conn) {
+                        pendingAttemptConnection = null
+                    }
                 }
+            }
+
+            if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                return@launch
             }
 
             if (!isConnected) {
@@ -698,15 +888,30 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connectUsb(usbConnection: android.hardware.usb.UsbDeviceConnection, usbIn: android.hardware.usb.UsbEndpoint, usbOut: android.hardware.usb.UsbEndpoint) {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        cancelPreviousConnectTask()
+        val thisConnectId = ++currentConnectId
+        activeConnectJob = viewModelScope.launch(Dispatchers.IO) {
             _connectionState.value = ConnectionState.Connecting("正在通过 USB 连接...")
             try {
                 val conn = com.yangyx.adbhelper.adb.AdbConnection(usbConnection, usbIn, usbOut, getApplication())
+                pendingAttemptConnection = conn
                 conn.connect(10000) { status ->
-                    _connectionState.value = ConnectionState.Connecting(status)
+                    if (thisConnectId == currentConnectId && coroutineContext.isActive) {
+                        _connectionState.value = ConnectionState.Connecting(status)
+                    }
                 }
+
+                if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    conn.disconnect()
+                    return@launch
+                }
+
+                activeConnection?.disconnect()
                 activeConnection = conn
+                pendingAttemptConnection = null
                 scrcpyController = com.yangyx.adbhelper.scrcpy.ScrcpyController(conn, viewModelScope, getApplication())
+
+                resetDeviceSessionStates("USB OTG", "USB 设备")
 
                 val marketName = conn.executeShell("getprop ro.product.marketname").trim()
                 val model = conn.executeShell("getprop ro.product.model").trim()
@@ -717,12 +922,22 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     else -> conn.deviceBanner
                 }
 
+                if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    conn.disconnect()
+                    return@launch
+                }
+
+                _terminalOutput.value = "=== ADB Helper 终端 ===\n已连接 USB 设备: $deviceName\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+
                 _connectionState.value = ConnectionState.Connected("USB OTG 设备", deviceName)
                 com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), deviceName, "USB OTG")
                 refreshFiles()
                 refreshSystemInfo()
                 refreshProcesses()
             } catch (e: Exception) {
+                if (thisConnectId != currentConnectId || !coroutineContext.isActive) {
+                    return@launch
+                }
                 _connectionState.value = ConnectionState.Error(e.message ?: "Unknown error")
                 usbConnection.close()
             }
@@ -730,12 +945,15 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        cancelPreviousConnectTask()
+        currentConnectId++
         com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
         scrcpyController?.stopMirroring()
         scrcpyController = null
         activeConnection?.disconnect()
         activeConnection = null
         _connectionState.value = ConnectionState.Disconnected
+        resetDeviceSessionStates("", "未连接")
     }
 
     fun rebootDevice(option: com.yangyx.adbhelper.ui.models.RebootOption, onFinished: (() -> Unit)? = null) {
@@ -765,11 +983,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // Pair device with Wireless Debugging (Android 11+)
-    fun pairDevice(ip: String, pairingPort: Int, pairingCode: String, onResult: (Boolean) -> Unit) {
+    fun pairDevice(ip: String, pairingPort: Int, pairingCode: String, onResult: (PairResult) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            val pairer = AdbPairer()
-            val success = pairer.pairDevice(ip, pairingPort, pairingCode)
-            onResult(success)
+            val pairer = AdbPairer(getApplication())
+            val result = pairer.pairOrProbe(ip, pairingPort, pairingCode)
+            withContext(Dispatchers.Main) {
+                onResult(result)
+            }
         }
     }
 
@@ -940,6 +1160,51 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun readRemoteTextFile(path: String, onResult: (Result<String>) -> Unit) {
+        val conn = activeConnection
+        if (conn == null) {
+            onResult(Result.failure(Exception("设备未连接")))
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val syncClient = AdbSyncClient(conn)
+                val text = syncClient.readTextFile(path)
+                withContext(Dispatchers.Main) {
+                    onResult(Result.success(text))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onResult(Result.failure(e))
+                }
+            }
+        }
+    }
+
+    fun saveRemoteTextFile(path: String, content: String, onResult: (Result<Unit>) -> Unit) {
+        val conn = activeConnection
+        if (conn == null) {
+            onResult(Result.failure(Exception("设备未连接")))
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val syncClient = AdbSyncClient(conn)
+                syncClient.writeTextFile(path, content)
+                withContext(Dispatchers.Main) {
+                    refreshFiles()
+                    _actionMessage.value = "文件保存成功"
+                    onResult(Result.success(Unit))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _actionMessage.value = "保存失败: ${e.message}"
+                    onResult(Result.failure(e))
+                }
+            }
+        }
+    }
+
     fun downloadRemoteFile(context: Context, remotePath: String, destUri: Uri, fileName: String, totalFileSize: Long = 0L) {
         val conn = activeConnection ?: return
         downloadJob?.cancel()
@@ -1099,43 +1364,75 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     // Terminal Commands
     fun executeCommand(command: String) {
         val trimmed = command.trim()
-        if (trimmed.isNotBlank()) {
-            addCommandToHistory(trimmed)
-        }
-
-        val conn = activeConnection ?: run {
-            _terminalOutput.value += "\n[错误] 设备未连接，请先在连接页面建立 ADB 连接。\n"
-            return
-        }
-        val currentPath = _terminalPath.value
         val isRoot = _isRootMode.value
         val userLabel = if (isRoot) "root" else "shell"
         val promptChar = if (isRoot) "#" else "$"
-        val promptHeader = "$userLabel@android:$currentPath $promptChar"
+        val currentPath = _terminalPath.value
+        val currentPrompt = "$userLabel@android:$currentPath $promptChar "
+
+        if (trimmed.isEmpty()) {
+            val out = _terminalOutput.value
+            _terminalOutput.value = if (out.endsWith(currentPrompt)) {
+                out.removeSuffix(currentPrompt) + "$currentPrompt\n$currentPrompt"
+            } else if (out.endsWith("\n") || out.isEmpty()) {
+                "$out$currentPrompt"
+            } else {
+                "$out\n$currentPrompt"
+            }
+            return
+        }
+
+        addCommandToHistory(trimmed)
+
+        if (trimmed == "clear" || trimmed == "cls") {
+            clearTerminal()
+            return
+        }
+
+        val conn = activeConnection ?: run {
+            val out = _terminalOutput.value
+            val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
+            _terminalOutput.value = out + prefix + "[错误] 设备未连接，请先在连接页面建立 ADB 连接。\n$currentPrompt"
+            return
+        }
 
         if (trimmed == "su" || trimmed == "su root" || trimmed == "su -") {
             _isRootMode.value = true
-            _terminalOutput.value += "\n$promptHeader $command\n[Context] 已切换为 Root 账户 (uid=0)，后续指令将自动以 root 权限执行。\n"
+            val out = _terminalOutput.value
+            val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
+            _terminalOutput.value = out + prefix + "[Context] 已切换为 Root 账户 (uid=0)，后续指令将自动以 root 权限执行。\nroot@android:$currentPath # "
             return
         }
 
         if (trimmed == "exit") {
+            val out = _terminalOutput.value
+            val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
             if (isRoot) {
                 _isRootMode.value = false
-                _terminalOutput.value += "\n$promptHeader exit\n[Context] 已退出 root 账户，恢复普通 shell 用户 (uid=2000)。\n"
+                _terminalOutput.value = out + prefix + "[Context] 已退出 root 账户，恢复普通 shell 用户 (uid=2000)。\nshell@android:$currentPath $ "
             } else {
-                _terminalOutput.value += "\n$promptHeader exit\n[Context] 终端会话重置。\n"
                 _terminalPath.value = "/"
+                _terminalOutput.value = out + prefix + "[Context] 终端会话重置。\nshell@android:/ $ "
             }
             return
         }
 
         viewModelScope.launch(Dispatchers.IO) {
-            _terminalOutput.value += "\n$promptHeader $command\n"
+            val out = _terminalOutput.value
+            val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
+            _terminalOutput.value = out + prefix
 
             val execCmd = if (trimmed.startsWith("cd ") || trimmed == "cd") {
-                val target = if (trimmed == "cd" || trimmed == "cd ~") "/sdcard" else trimmed.removePrefix("cd ").trim()
-                "cd \"$target\" 2>/dev/null && pwd"
+                val target = if (trimmed == "cd" || trimmed == "cd ~") "/sdcard" else trimmed.removePrefix("cd ").trim().removeSurrounding("\"").removeSurrounding("'")
+                if (target.startsWith("/")) {
+                    "cd \"$target\" 2>&1 && pwd"
+                } else {
+                    if (currentPath == "/") {
+                        "cd \"/$target\" 2>&1 && pwd"
+                    } else {
+                        "cd \"$currentPath\" 2>/dev/null && cd \"$target\" 2>&1 && pwd"
+                    }
+                }
             } else {
                 if (currentPath != "/") "cd \"$currentPath\" && $command" else command
             }
@@ -1150,25 +1447,43 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val res = conn.executeShell(actualCmd)
                 if (trimmed.startsWith("cd ") || trimmed == "cd") {
-                    val newDir = res.trim().lines().lastOrNull { it.startsWith("/") }
+                    val lines = res.trim().lines().filter { it.isNotBlank() }
+                    val newDir = lines.lastOrNull { line ->
+                        val l = line.trim()
+                        l.startsWith("/") && !l.contains("No such file") && !l.contains("Permission denied") && !l.contains("Not a directory") && !l.contains("not found")
+                    }?.trim()
                     if (!newDir.isNullOrBlank()) {
                         _terminalPath.value = newDir
-                    } else {
-                        _terminalOutput.value += res
+                    } else if (res.isNotBlank()) {
+                        _terminalOutput.value += if (res.endsWith("\n")) res else "$res\n"
                     }
                 } else {
-                    _terminalOutput.value += res
+                    if (res.isNotBlank()) {
+                        _terminalOutput.value += if (res.endsWith("\n")) res else "$res\n"
+                    }
                 }
                 repository.saveCommand(conn.ip, command, true)
             } catch (e: Exception) {
                 _terminalOutput.value += "Error: ${e.message}\n"
                 repository.saveCommand(conn.ip, command, false)
+            } finally {
+                val latestIsRoot = _isRootMode.value
+                val latestUser = if (latestIsRoot) "root" else "shell"
+                val latestChar = if (latestIsRoot) "#" else "$"
+                val latestPath = _terminalPath.value
+                val latestPrompt = "$latestUser@android:$latestPath $latestChar "
+                val curr = _terminalOutput.value
+                _terminalOutput.value = if (curr.endsWith("\n") || curr.isEmpty()) "$curr$latestPrompt" else "$curr\n$latestPrompt"
             }
         }
     }
 
     fun clearTerminal() {
-        _terminalOutput.value = "ADB Helper Terminal\nReady for input...\n"
+        val isRoot = _isRootMode.value
+        val userLabel = if (isRoot) "root" else "shell"
+        val promptChar = if (isRoot) "#" else "$"
+        val currentPath = _terminalPath.value
+        _terminalOutput.value = "=== ADB Helper 终端 ===\n控制台已清空\n\n$userLabel@android:$currentPath $promptChar "
     }
 
     // Tab Auto-completion logic
@@ -1223,7 +1538,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     val currentPath = _terminalPath.value
                     val userLabel = if (isRoot) "root" else "shell"
                     val promptChar = if (isRoot) "#" else "$"
-                    _terminalOutput.value += "\n$userLabel@android:$currentPath $promptChar $currentText\n" + matchedCmds.joinToString("  ") + "\n"
+                    _terminalOutput.value += "\n$userLabel@android:$currentPath $promptChar $currentText\n" + matchedCmds.joinToString("  ") + "\n$userLabel@android:$currentPath $promptChar "
                     return@withContext null
                 }
             }
@@ -1295,7 +1610,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     // Show candidates in terminal
                     val userLabel = if (isRoot) "root" else "shell"
                     val promptChar = if (isRoot) "#" else "$"
-                    _terminalOutput.value += "\n$userLabel@android:$workingDir $promptChar $currentText\n" + items.joinToString("  ") + "\n"
+                    _terminalOutput.value += "\n$userLabel@android:$workingDir $promptChar $currentText\n" + items.joinToString("  ") + "\n$userLabel@android:$workingDir $promptChar "
                     return@withContext null
                 }
             }
@@ -1317,123 +1632,295 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // System Monitor
-    fun refreshSystemInfo() {
+    private fun parseAllProps(raw: String): Map<String, String> {
+        val map = HashMap<String, String>()
+        raw.lines().forEach { line ->
+            val trimmed = line.trim()
+            if (trimmed.startsWith("[") && trimmed.contains("]: [")) {
+                val key = trimmed.substringAfter("[").substringBefore("]: [")
+                val value = trimmed.substringAfter("]: [").removeSuffix("]")
+                map[key] = value
+            }
+        }
+        return map
+    }
+
+    private suspend fun fetchStaticSystemInfo(conn: AdbConnection): SystemInfo = withContext(Dispatchers.IO) {
+        val rawProps = try {
+            conn.executeShell("getprop")
+        } catch (_: Exception) { "" }
+
+        val props = parseAllProps(rawProps)
+
+        val model = props["ro.product.model"] ?: conn.deviceBanner.ifBlank { "Android 设备" }
+        val brand = props["ro.product.brand"] ?: "Unknown"
+        val release = props["ro.build.version.release"] ?: "Unknown"
+        val sdk = props["ro.build.version.sdk"]?.toIntOrNull() ?: 0
+        val arch = props["ro.product.cpu.abi"] ?: "aarch64"
+
+        // Market name: ro.product.marketname -> fallback to ro.product.vendor.marketname or ro.vendor.marketname
+        val marketName = props["ro.product.marketname"]?.ifBlank { null }
+            ?: props["ro.product.vendor.marketname"]?.ifBlank { null }
+            ?: props["ro.vendor.marketname"]?.ifBlank { null }
+
+        // OS version (e.g. HyperOS / MIUI incremental version or custom ROM version)
+        val rawMiOs = props["ro.mi.os.version.incremental"]?.trim() ?: ""
+        val miuiVer = props["ro.miui.ui.version.name"]?.trim() ?: ""
+        val incVer = props["ro.build.version.incremental"]?.trim() ?: ""
+        val osVersion = when {
+            rawMiOs.isNotEmpty() -> rawMiOs
+            miuiVer.isNotEmpty() && incVer.isNotEmpty() -> "$miuiVer ($incVer)"
+            incVer.isNotEmpty() -> incVer
+            else -> null
+        }
+
+        // CPU Hardware & SoC model
+        val cpuHardware = props["ro.hardware"]?.ifBlank { null }
+        val socModel = (props["ro.soc.model"] ?: props["ro.board.platform"])?.ifBlank { null }
+
+        // Serial Number
+        val serialNo = (props["ro.serialno"] ?: props["ro.boot.serialno"] ?: props["ro.ril.oem.sno"])
+            ?.takeIf { it != "unknown" && it.isNotBlank() }
+
+        SystemInfo(
+            model = model,
+            manufacturer = brand,
+            androidVersion = release,
+            sdkVersion = sdk,
+            cpuArchitecture = arch,
+            marketName = marketName,
+            osVersion = osVersion,
+            cpuHardware = cpuHardware,
+            socModel = socModel,
+            serialNo = serialNo
+        )
+    }
+
+    private data class DynamicMetrics(
+        val cpuUsage: Float,
+        val ramTotalMb: Long,
+        val ramUsedMb: Long,
+        val batteryLevel: Int,
+        val batteryTemp: Float,
+        val batteryStatus: String,
+        val storageTotalGb: Float,
+        val storageUsedGb: Float
+    )
+
+    private suspend fun readCpuUsage(conn: AdbConnection): Float = withContext(Dispatchers.IO) {
+        var calculatedCpuUsage = 0f
+        try {
+            val statLine1 = conn.executeShell("cat /proc/stat 2>/dev/null").lines().firstOrNull { it.startsWith("cpu ") }
+            if (statLine1 != null) {
+                kotlinx.coroutines.delay(180)
+                val statLine2 = conn.executeShell("cat /proc/stat 2>/dev/null").lines().firstOrNull { it.startsWith("cpu ") }
+                if (statLine2 != null) {
+                    val p1 = statLine1.trim().split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
+                    val p2 = statLine2.trim().split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
+                    if (p1.size >= 4 && p2.size >= 4) {
+                        val total1 = p1.sum()
+                        val total2 = p2.sum()
+                        val idle1 = p1.getOrElse(3) { 0L } + p1.getOrElse(4) { 0L }
+                        val idle2 = p2.getOrElse(3) { 0L } + p2.getOrElse(4) { 0L }
+
+                        val totalDelta = total2 - total1
+                        val idleDelta = idle2 - idle1
+
+                        if (totalDelta > 0) {
+                            val usedDelta = (totalDelta - idleDelta).coerceAtLeast(0L)
+                            val pct = (usedDelta.toDouble() * 100.0 / totalDelta.toDouble()).toFloat()
+                            calculatedCpuUsage = String.format(java.util.Locale.US, "%.1f", pct).toFloatOrNull() ?: pct
+                        }
+                    }
+                }
+            }
+
+            if (calculatedCpuUsage <= 0f) {
+                // Fallback to dumpsys cpuinfo
+                val cpuInfo = conn.executeShell("dumpsys cpuinfo 2>/dev/null")
+                val totalLine = cpuInfo.lines().firstOrNull { it.contains("TOTAL", ignoreCase = true) }
+                if (totalLine != null) {
+                    val match = Regex("([0-9]+(?:\\.[0-9]+)?)\\s*%\\s*TOTAL", RegexOption.IGNORE_CASE).find(totalLine)
+                    if (match != null) {
+                        val parsed = match.groupValues[1].toFloatOrNull() ?: 0f
+                        calculatedCpuUsage = String.format(java.util.Locale.US, "%.1f", parsed).toFloatOrNull() ?: parsed
+                    }
+                }
+            }
+
+            if (calculatedCpuUsage <= 0f) {
+                // Fallback to top
+                val topOut = conn.executeShell("top -n 1 -b 2>/dev/null || top -n 1 2>/dev/null")
+                val idleMatch = Regex("([0-9]+(?:\\.[0-9]+)?)\\s*%\\s*idle", RegexOption.IGNORE_CASE).find(topOut)
+                if (idleMatch != null) {
+                    val idle = idleMatch.groupValues[1].toFloatOrNull() ?: 100f
+                    val usage = (100f - idle).coerceIn(0f, 100f)
+                    calculatedCpuUsage = String.format(java.util.Locale.US, "%.1f", usage).toFloatOrNull() ?: usage
+                }
+            }
+        } catch (_: Exception) {}
+        calculatedCpuUsage
+    }
+
+    private suspend fun readRam(conn: AdbConnection): Pair<Long, Long> = withContext(Dispatchers.IO) {
+        var totalRam = 0L
+        var freeRam = 0L
+        var availRam = 0L
+        try {
+            val memDump = conn.executeShell("cat /proc/meminfo")
+            memDump.split("\n").forEach { line ->
+                if (line.startsWith("MemTotal:")) totalRam = (line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: 0L) / 1024
+                if (line.startsWith("MemFree:")) freeRam = (line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: 0L) / 1024
+                if (line.startsWith("MemAvailable:")) availRam = (line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: 0L) / 1024
+            }
+        } catch (_: Exception) {}
+        val usedRam = if (availRam > 0) totalRam - availRam else (totalRam - freeRam).coerceAtLeast(0L)
+        Pair(totalRam, usedRam)
+    }
+
+    private suspend fun readBattery(conn: AdbConnection): Triple<Int, Float, String> = withContext(Dispatchers.IO) {
+        var level = -1
+        var temp = 0f
+        var rawStatus = "2"
+        try {
+            val batteryDump = conn.executeShell("dumpsys battery")
+            batteryDump.split("\n").forEach { line ->
+                val trimmed = line.trim()
+                if (trimmed.startsWith("level:")) {
+                    level = trimmed.substringAfter(":").trim().toIntOrNull() ?: level
+                } else if (trimmed.startsWith("temperature:")) {
+                    temp = (trimmed.substringAfter(":").trim().toFloatOrNull() ?: 0f) / 10f
+                } else if (trimmed.startsWith("status:")) {
+                    rawStatus = trimmed.substringAfter(":").trim()
+                }
+            }
+            if (level <= 0) {
+                val capStr = conn.executeShell("cat /sys/class/power_supply/battery/capacity").trim()
+                level = capStr.toIntOrNull() ?: 85
+            }
+        } catch (_: Exception) {}
+
+        val statusStr = when (rawStatus) {
+            "1" -> "未知状态 (Unknown)"
+            "2" -> "正在充电 (Charging)"
+            "3" -> "放电中 / 未充电 (Discharging)"
+            "4" -> "未在充电 (Not Charging)"
+            "5" -> "已充满 (Full)"
+            else -> if (rawStatus.isNotBlank()) rawStatus else "正常 (Normal)"
+        }
+        Triple(level.coerceAtLeast(0), temp, statusStr)
+    }
+
+    private suspend fun readStorage(conn: AdbConnection): Pair<Float, Float> = withContext(Dispatchers.IO) {
+        var dynamicStorageTotalGb = 0f
+        var dynamicStorageUsedGb = 0f
+        try {
+            val dfOutput = conn.executeShell("df -k /data 2>/dev/null || df /data 2>/dev/null || df /storage/emulated/0 2>/dev/null || df /sdcard 2>/dev/null || df / 2>/dev/null")
+            val dfLines = dfOutput.trim().lines().filter { it.isNotBlank() }
+            for (line in dfLines) {
+                if (line.contains("Filesystem") || line.contains("1K-blocks") || line.contains("Size")) continue
+                val tokens = line.trim().split(Regex("\\s+"))
+                if (tokens.size >= 4) {
+                    val totalKb = tokens[1].toLongOrNull()
+                    val usedKb = tokens[2].toLongOrNull()
+                    val availKb = tokens[3].toLongOrNull()
+
+                    if (totalKb != null && totalKb > 0) {
+                        val totalG = totalKb.toDouble() / (1024.0 * 1024.0)
+                        val usedG = when {
+                            usedKb != null -> usedKb.toDouble() / (1024.0 * 1024.0)
+                            availKb != null -> (totalKb - availKb).toDouble() / (1024.0 * 1024.0)
+                            else -> 0.0
+                        }
+                        dynamicStorageTotalGb = String.format(java.util.Locale.US, "%.1f", totalG).toFloatOrNull() ?: 0f
+                        dynamicStorageUsedGb = String.format(java.util.Locale.US, "%.1f", usedG).toFloatOrNull() ?: 0f
+                        if (dynamicStorageTotalGb > 0f) break
+                    }
+                }
+            }
+
+            if (dynamicStorageTotalGb <= 0f) {
+                val statOut = conn.executeShell("stat -f -c \"%b %a %s\" /data 2>/dev/null").trim()
+                val statParts = statOut.split(Regex("\\s+"))
+                if (statParts.size >= 3) {
+                    val totalBlocks = statParts[0].toLongOrNull() ?: 0L
+                    val availBlocks = statParts[1].toLongOrNull() ?: 0L
+                    val blockSize = statParts[2].toLongOrNull() ?: 4096L
+                    if (totalBlocks > 0) {
+                        val totalBytes = totalBlocks.toDouble() * blockSize
+                        val freeBytes = availBlocks.toDouble() * blockSize
+                        val usedBytes = totalBytes - freeBytes
+                        val totalG = totalBytes / (1024.0 * 1024.0 * 1024.0)
+                        val usedG = usedBytes / (1024.0 * 1024.0 * 1024.0)
+                        dynamicStorageTotalGb = String.format(java.util.Locale.US, "%.1f", totalG).toFloatOrNull() ?: 0f
+                        dynamicStorageUsedGb = String.format(java.util.Locale.US, "%.1f", usedG).toFloatOrNull() ?: 0f
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        Pair(dynamicStorageTotalGb, dynamicStorageUsedGb)
+    }
+
+    private suspend fun readDynamicMetrics(conn: AdbConnection): DynamicMetrics = kotlinx.coroutines.coroutineScope {
+        val cpuDef = async(Dispatchers.IO) { readCpuUsage(conn) }
+        val ramDef = async(Dispatchers.IO) { readRam(conn) }
+        val batteryDef = async(Dispatchers.IO) { readBattery(conn) }
+        val storageDef = async(Dispatchers.IO) { readStorage(conn) }
+
+        val cpu = cpuDef.await()
+        val ram = ramDef.await()
+        val battery = batteryDef.await()
+        val storage = storageDef.await()
+
+        DynamicMetrics(
+            cpuUsage = cpu,
+            ramTotalMb = ram.first,
+            ramUsedMb = ram.second,
+            batteryLevel = battery.first,
+            batteryTemp = battery.second,
+            batteryStatus = battery.third,
+            storageTotalGb = storage.first,
+            storageUsedGb = storage.second
+        )
+    }
+
+    /**
+     * 刷新设备系统信息：
+     * 针对静态不变量（设备型号、系统版本、SoC、序列号等），在连接期间持久缓存，避免重复请求ADB properties；
+     * 每次刷新仅并发重新读取动态变化的数据（CPU占用、RAM使用、电池状态与温度、存储空间），极大提升刷新响应速度。
+     */
+    fun refreshSystemInfo(forceFullRefresh: Boolean = false) {
         val conn = activeConnection ?: return
         viewModelScope.launch(Dispatchers.IO) {
+            _isRefreshingSystemInfo.value = true
             try {
-                val model = conn.executeShell("getprop ro.product.model").trim()
-                val brand = conn.executeShell("getprop ro.product.brand").trim()
-                val release = conn.executeShell("getprop ro.build.version.release").trim()
-                val sdk = conn.executeShell("getprop ro.build.version.sdk").trim().toIntOrNull() ?: 0
-                val arch = conn.executeShell("getprop ro.product.cpu.abi").trim()
-
-                // Market name: ro.product.marketname -> fallback to ro.product.vendor.marketname or ro.vendor.marketname
-                val rawMarketName = conn.executeShell("getprop ro.product.marketname").trim()
-                val marketName = if (rawMarketName.isNotEmpty()) rawMarketName else {
-                    val vendorMarket = conn.executeShell("getprop ro.product.vendor.marketname").trim()
-                    if (vendorMarket.isNotEmpty()) vendorMarket else null
+                // 1. 优先使用已缓存的静态属性；仅当未缓存或强制重载时才抓取一次 getprop
+                val staticBase = if (cachedStaticInfo == null || forceFullRefresh) {
+                    val fetched = fetchStaticSystemInfo(conn)
+                    cachedStaticInfo = fetched
+                    fetched
+                } else {
+                    cachedStaticInfo!!
                 }
 
-                // OS version (non-Android, e.g. HyperOS / MIUI incremental version or custom ROM version)
-                val rawMiOs = conn.executeShell("getprop ro.mi.os.version.incremental").trim()
-                val osVersion = when {
-                    rawMiOs.isNotEmpty() -> rawMiOs
-                    else -> {
-                        val miuiVer = conn.executeShell("getprop ro.miui.ui.version.name").trim()
-                        val incVer = conn.executeShell("getprop ro.build.version.incremental").trim()
-                        if (miuiVer.isNotEmpty() && incVer.isNotEmpty()) "$miuiVer ($incVer)"
-                        else if (incVer.isNotEmpty()) incVer
-                        else null
-                    }
-                }
+                // 2. 仅并发读取动态变化项：CPU使用率、内存、电池、存储
+                val dynamic = readDynamicMetrics(conn)
 
-                // CPU Hardware & SoC model
-                val rawHardware = conn.executeShell("getprop ro.hardware").trim()
-                val cpuHardware = if (rawHardware.isNotEmpty()) rawHardware else null
-
-                val rawSocModel = conn.executeShell("getprop ro.soc.model").trim()
-                val socModel = if (rawSocModel.isNotEmpty()) rawSocModel else {
-                    val boardPlatform = conn.executeShell("getprop ro.board.platform").trim()
-                    if (boardPlatform.isNotEmpty()) boardPlatform else null
-                }
-
-                // Serial Number
-                val rawSerial = conn.executeShell("getprop ro.serialno").trim()
-                val serialNo = if (rawSerial.isNotEmpty() && rawSerial != "unknown") rawSerial else {
-                    val bootSerial = conn.executeShell("getprop ro.boot.serialno").trim()
-                    if (bootSerial.isNotEmpty() && bootSerial != "unknown") bootSerial else {
-                        val rilSerial = conn.executeShell("getprop ro.ril.oem.sno").trim()
-                        if (rilSerial.isNotEmpty() && rilSerial != "unknown") rilSerial else null
-                    }
-                }
-
-                // Battery
-                val batteryDump = conn.executeShell("dumpsys battery")
-                var level = -1
-                var temp = 0f
-                var rawStatus = "2"
-
-                batteryDump.split("\n").forEach { line ->
-                    val trimmed = line.trim()
-                    if (trimmed.startsWith("level:")) {
-                        level = trimmed.substringAfter(":").trim().toIntOrNull() ?: level
-                    } else if (trimmed.startsWith("temperature:")) {
-                        temp = (trimmed.substringAfter(":").trim().toFloatOrNull() ?: 0f) / 10f
-                    } else if (trimmed.startsWith("status:")) {
-                        rawStatus = trimmed.substringAfter(":").trim()
-                    }
-                }
-
-                if (level <= 0) {
-                    val capStr = conn.executeShell("cat /sys/class/power_supply/battery/capacity").trim()
-                    level = capStr.toIntOrNull() ?: 85
-                }
-
-                val statusStr = when (rawStatus) {
-                    "1" -> "未知状态 (Unknown)"
-                    "2" -> "正在充电 (Charging)"
-                    "3" -> "放电中 / 未充电 (Discharging)"
-                    "4" -> "未在充电 (Not Charging)"
-                    "5" -> "已充满 (Full)"
-                    else -> if (rawStatus.isNotBlank()) rawStatus else "正常 (Normal)"
-                }
-
-                // RAM
-                val memDump = conn.executeShell("cat /proc/meminfo")
-                var totalRam = 0L
-                var freeRam = 0L
-                var availRam = 0L
-
-                memDump.split("\n").forEach { line ->
-                    if (line.startsWith("MemTotal:")) totalRam = (line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: 0L) / 1024
-                    if (line.startsWith("MemFree:")) freeRam = (line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: 0L) / 1024
-                    if (line.startsWith("MemAvailable:")) availRam = (line.replace(Regex("[^0-9]"), "").toLongOrNull() ?: 0L) / 1024
-                }
-
-                val usedRam = totalRam - availRam
-
-                _systemInfo.value = SystemInfo(
-                    model = model,
-                    manufacturer = brand,
-                    androidVersion = release,
-                    sdkVersion = sdk,
-                    cpuUsage = 24.5f,
-                    cpuArchitecture = arch,
-                    ramTotalMb = totalRam,
-                    ramUsedMb = usedRam,
-                    batteryLevel = level,
-                    batteryTemperature = temp,
-                    batteryStatus = statusStr,
-                    storageTotalGb = 128f,
-                    storageUsedGb = 42.8f,
-                    marketName = marketName,
-                    osVersion = osVersion,
-                    cpuHardware = cpuHardware,
-                    socModel = socModel,
-                    serialNo = serialNo
+                // 3. 组合更新状态
+                _systemInfo.value = staticBase.copy(
+                    cpuUsage = dynamic.cpuUsage,
+                    ramTotalMb = dynamic.ramTotalMb,
+                    ramUsedMb = dynamic.ramUsedMb,
+                    batteryLevel = dynamic.batteryLevel,
+                    batteryTemperature = dynamic.batteryTemp,
+                    batteryStatus = dynamic.batteryStatus,
+                    storageTotalGb = dynamic.storageTotalGb,
+                    storageUsedGb = dynamic.storageUsedGb
                 )
             } catch (e: Exception) {
                 e.printStackTrace()
+            } finally {
+                _isRefreshingSystemInfo.value = false
             }
         }
     }
@@ -1616,6 +2103,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
                 val completedCount = java.util.concurrent.atomic.AtomicInteger(0)
                 val failCount = java.util.concurrent.atomic.AtomicInteger(0)
+                val aaptVersionMap = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
 
                 val partitions = (0 until numThreads).map { threadIdx ->
                     userAppsList.filterIndexed { index, _ -> index % numThreads == threadIdx }
@@ -1651,9 +2139,19 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                                     var foundZhLabel: String? = null
                                     var foundDefLabel: String? = null
                                     var foundAppLabel: String? = null
+                                    var foundVerName: String = ""
+                                    var foundVerCode: Long = 0L
 
                                     for (rawLine in currentRawLines) {
                                         val trimmed = rawLine.trim()
+                                        if (trimmed.startsWith("package:") && (trimmed.contains("name='") || trimmed.contains("versionName='") || trimmed.contains("versionCode='"))) {
+                                            if (trimmed.contains("versionName='")) {
+                                                foundVerName = trimmed.substringAfter("versionName='").substringBefore("'")
+                                            }
+                                            if (trimmed.contains("versionCode='")) {
+                                                foundVerCode = trimmed.substringAfter("versionCode='").substringBefore("'").toLongOrNull() ?: 0L
+                                            }
+                                        }
                                         if (trimmed.contains("application-label")) {
                                             val rawKey = trimmed.substringBefore(":").trim()
                                             val rawVal = trimmed.substringAfter("'").substringBefore("'")
@@ -1675,6 +2173,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                                             val label = cleanLabel(trimmed.substringAfter("label='").substringBefore("'"))
                                             if (label != null && foundAppLabel == null) foundAppLabel = label
                                         }
+                                    }
+
+                                    if (foundVerName.isNotEmpty() || foundVerCode > 0L) {
+                                        aaptVersionMap[pkg] = Pair(foundVerName, foundVerCode)
                                     }
 
                                     val bestLabel = foundZhCnLabel ?: foundZhLabel ?: foundDefLabel ?: foundAppLabel
@@ -1721,11 +2223,62 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }.awaitAll()
                 }
-                log("aapt2 多线程解析完成：共处理 ${completedCount.get()} 个第三方应用，成功提取出 ${labelMap.size} 个 Label，未提取到 Label: ${failCount.get()} 个")
+                log("aapt2 多线程解析完成：共处理 ${completedCount.get()} 个第三方应用，成功提取出 ${labelMap.size} 个 Label，提取版本号 ${aaptVersionMap.size} 个，未提取到 Label: ${failCount.get()} 个")
 
-                // Step 6: Assemble application list
+                // Step 6: Retrieve dumpsys package versions for system apps and fallbacks
+                val dumpsysVersionMap = mutableMapOf<String, Pair<String, Long>>()
+                try {
+                    log("5. 检索被控端应用版本号 (dumpsys package)...")
+                    val dumpsysOut = conn.executeShell("dumpsys package packages 2>/dev/null | grep -E 'Package \\[|versionName=|versionCode='", 12000)
+                    if (dumpsysOut.isNotBlank()) {
+                        var curPkg: String? = null
+                        var curVerName: String = ""
+                        var curVerCode: Long = 0L
+
+                        for (line in dumpsysOut.lines()) {
+                            val t = line.trim()
+                            if (t.startsWith("Package [") && t.contains("]")) {
+                                if (curPkg != null && (curVerName.isNotEmpty() || curVerCode > 0L)) {
+                                    dumpsysVersionMap[curPkg] = Pair(curVerName, curVerCode)
+                                }
+                                curPkg = t.substringAfter("Package [").substringBefore("]")
+                                curVerName = ""
+                                curVerCode = 0L
+                            } else if (t.startsWith("versionName=")) {
+                                curVerName = t.substringAfter("versionName=").trim()
+                            } else if (t.contains("versionCode=")) {
+                                val codeStr = t.substringAfter("versionCode=").substringBefore(" ").trim()
+                                curVerCode = codeStr.toLongOrNull() ?: 0L
+                            }
+                        }
+                        if (curPkg != null && (curVerName.isNotEmpty() || curVerCode > 0L)) {
+                            dumpsysVersionMap[curPkg] = Pair(curVerName, curVerCode)
+                        }
+                        log("  dumpsys 提取到 ${dumpsysVersionMap.size} 个应用版本信息")
+                    }
+                } catch (e: Exception) {
+                    log("  dumpsys 提取版本信息异常: ${e.message}")
+                }
+
+                if (dumpsysVersionMap.isEmpty()) {
+                    try {
+                        val pmCodeOut = conn.executeShell("pm list packages --show-versioncode 2>/dev/null", 8000)
+                        for (line in pmCodeOut.lines()) {
+                            val t = line.trim()
+                            if (t.startsWith("package:") && t.contains("versionCode:")) {
+                                val pkg = t.substringAfter("package:").substringBefore(" ").trim()
+                                val code = t.substringAfter("versionCode:").trim().toLongOrNull() ?: 0L
+                                if (pkg.isNotEmpty() && code > 0L) {
+                                    dumpsysVersionMap[pkg] = Pair("", code)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Step 7: Assemble application list
                 _appLoadingStatus.value = "正在组装应用列表..."
-                log("5. 组装第三方应用与系统应用列表...")
+                log("6. 组装第三方应用与系统应用列表...")
                 val systemAppsOut = conn.executeShell("pm list packages -s -f")
 
                 val appList = mutableListOf<RemoteAppItem>()
@@ -1733,12 +2286,15 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 userAppsList.forEach { entry ->
                     val pkg = entry.pkg
                     val friendlyName = labelMap[pkg] ?: parseFriendlyAppName(pkg)
+                    val verPair = aaptVersionMap[pkg] ?: dumpsysVersionMap[pkg]
                     appList.add(
                         RemoteAppItem(
                             packageName = pkg,
                             appName = friendlyName,
                             isSystemApp = false,
-                            apkPath = entry.apk
+                            apkPath = entry.apk,
+                            versionName = verPair?.first.orEmpty(),
+                            versionCode = verPair?.second ?: 0L
                         )
                     )
                 }
@@ -1751,12 +2307,15 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         val pkg = withoutPrefix.substringAfterLast("=")
                         if (pkg.isNotEmpty() && userAppsList.none { it.pkg == pkg }) {
                             val friendlyName = labelMap[pkg] ?: parseFriendlyAppName(pkg)
+                            val verPair = dumpsysVersionMap[pkg] ?: aaptVersionMap[pkg]
                             appList.add(
                                 RemoteAppItem(
                                     packageName = pkg,
                                     appName = friendlyName,
                                     isSystemApp = true,
-                                    apkPath = apk
+                                    apkPath = apk,
+                                    versionName = verPair?.first.orEmpty(),
+                                    versionCode = verPair?.second ?: 0L
                                 )
                             )
                         }
@@ -1764,12 +2323,15 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         val pkg = trimmed.replace("package:", "").trim()
                         if (pkg.isNotEmpty() && userAppsList.none { it.pkg == pkg } && appList.none { it.packageName == pkg }) {
                             val friendlyName = labelMap[pkg] ?: parseFriendlyAppName(pkg)
+                            val verPair = dumpsysVersionMap[pkg] ?: aaptVersionMap[pkg]
                             appList.add(
                                 RemoteAppItem(
                                     packageName = pkg,
                                     appName = friendlyName,
                                     isSystemApp = true,
-                                    apkPath = ""
+                                    apkPath = "",
+                                    versionName = verPair?.first.orEmpty(),
+                                    versionCode = verPair?.second ?: 0L
                                 )
                             )
                         }

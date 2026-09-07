@@ -17,7 +17,8 @@ data class DeviceEntity(
     val sortOrder: Int = 0,
     val isFavorite: Boolean = false,
     val lastUsedBitrate: Int = 4000000,
-    val lastUsedResolution: Int = 1080
+    val lastUsedResolution: Int = 1080,
+    val iconType: String = "phone"
 )
 
 @Entity(tableName = "command_history")

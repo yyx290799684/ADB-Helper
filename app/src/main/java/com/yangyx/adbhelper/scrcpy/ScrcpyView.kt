@@ -1,5 +1,12 @@
 package com.yangyx.adbhelper.scrcpy
 
+import android.content.pm.ActivityInfo
+import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.StayCurrentLandscape
+import androidx.compose.material.icons.filled.StayCurrentPortrait
+import androidx.compose.material.icons.filled.ScreenLockRotation
+import androidx.compose.material.icons.filled.Rotate90DegreesCw
+import androidx.compose.material.icons.filled.ScreenRotationAlt
 import kotlinx.coroutines.launch
 import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
@@ -12,6 +19,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CheckCircle
@@ -331,8 +339,11 @@ fun LogConsoleView(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        val isDarkTheme = isSystemInDarkTheme()
+
         Surface(
-            color = Color(0xFF1E1E1E),
+            color = if (isDarkTheme) Color(0xFF1E1E1E) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            border = if (!isDarkTheme) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)) else null,
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier
                 .fillMaxWidth()
@@ -345,7 +356,7 @@ fun LogConsoleView(
                 ) {
                     Text(
                         text = "暂无运行日志，点击“启动投屏”查看服务初始化与部署详情",
-                        color = Color.Gray,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                         fontSize = 12.sp
                     )
                 }
@@ -359,10 +370,10 @@ fun LogConsoleView(
                 ) {
                     items(logs) { log ->
                         val levelColor = when (log.level) {
-                            LogLevel.SUCCESS -> Color(0xFF4CAF50)
-                            LogLevel.INFO -> Color(0xFF64B5F6)
-                            LogLevel.WARN -> Color(0xFFFFB74D)
-                            LogLevel.ERROR -> Color(0xFFE57373)
+                            LogLevel.SUCCESS -> if (isDarkTheme) Color(0xFF4CAF50) else Color(0xFF2E7D32)
+                            LogLevel.INFO -> if (isDarkTheme) Color(0xFF64B5F6) else Color(0xFF1565C0)
+                            LogLevel.WARN -> if (isDarkTheme) Color(0xFFFFB74D) else Color(0xFFE65100)
+                            LogLevel.ERROR -> if (isDarkTheme) Color(0xFFE57373) else Color(0xFFC62828)
                         }
                         Text(
                             text = "[${log.timestamp}] ${log.message}",
@@ -408,10 +419,12 @@ fun ScrcpyView(
     var containerWidth by remember { mutableStateOf(1) }
     var containerHeight by remember { mutableStateOf(1) }
 
+    val isStreaming = screenState is ScreenState.Streaming
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(if (isStreaming) Color.Black else MaterialTheme.colorScheme.background)
             .onGloballyPositioned { coordinates ->
                 containerWidth = coordinates.size.width
                 containerHeight = coordinates.size.height
@@ -594,7 +607,7 @@ fun ScrcpyView(
                 ) {
                     CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text("正在部署 scrcpy-server 并建立低延迟图像传输...", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("正在部署 scrcpy-server 并建立低延迟图像传输...", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(12.dp))
 
                     val lastLog = logs.lastOrNull()?.message ?: ""
@@ -650,7 +663,7 @@ fun ScrcpyView(
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = state.message,
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.onBackground,
                         fontSize = 14.sp
                     )
                     Spacer(modifier = Modifier.height(16.dp))
@@ -1387,11 +1400,24 @@ fun ScrcpyView(
                                                     fontWeight = FontWeight.Bold,
                                                     fontSize = 15.sp
                                                 )
-                                                Text(
-                                                    text = app.packageName,
-                                                    fontSize = 12.sp,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Text(
+                                                        text = app.packageName,
+                                                        fontSize = 12.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        maxLines = 1,
+                                                        modifier = Modifier.weight(1f, fill = false)
+                                                    )
+                                                    if (app.versionName.isNotBlank()) {
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text(
+                                                            text = "v${app.versionName}",
+                                                            fontSize = 11.sp,
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            maxLines = 1
+                                                        )
+                                                    }
+                                                }
                                             }
                                             if (app.isSystemApp) {
                                                 Surface(
@@ -1448,11 +1474,49 @@ private fun StreamingViewContent(
     var cameraRotationDegrees by remember { mutableIntStateOf(0) }
     var showMultiTouchDialog by remember { mutableStateOf(false) }
     var showVolumeDialog by remember { mutableStateOf(false) }
+    var showOrientationDialog by remember { mutableStateOf(false) }
     var isTopBarExpanded by remember { mutableStateOf(true) }
     var isToolbarExpanded by remember { mutableStateOf(true) }
     var miniFabOffsetX by remember { mutableFloatStateOf(0f) }
     var miniFabOffsetY by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
+
+    val activity = context as? Activity
+    val isRemoteLandscape = state.width > state.height && state.width > 0 && state.height > 0
+
+    // Adaptive orientation lifecycle: Automatically match host orientation to remote screen
+    LaunchedEffect(isRemoteLandscape, config.autoRotateHost, config.hostOrientationMode, isFullscreen) {
+        if (activity != null) {
+            when (config.hostOrientationMode) {
+                HostOrientationMode.SENSOR -> {
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                }
+                HostOrientationMode.PORTRAIT -> {
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                }
+                HostOrientationMode.LANDSCAPE -> {
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                }
+                HostOrientationMode.AUTO -> {
+                    if (config.autoRotateHost || isFullscreen) {
+                        if (isRemoteLandscape) {
+                            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        } else {
+                            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+                        }
+                    } else {
+                        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    }
+                }
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
 
     val isCamera = config.videoSource.equals("camera", ignoreCase = true)
     val isRotated90or270 = isCamera && (cameraRotationDegrees % 180 != 0)
@@ -1765,6 +1829,13 @@ private fun StreamingViewContent(
                             onClick = { controller.wakeUpRemoteScreen() }
                         )
                         ToolbarActionItem(
+                            icon = Icons.Default.ScreenRotation,
+                            name = "屏幕方向",
+                            detailName = "屏幕方向自适应与旋转控制",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = { showOrientationDialog = true }
+                        )
+                        ToolbarActionItem(
                             icon = Icons.Default.TouchApp,
                             name = "多点触控",
                             detailName = "多点触控与手势辅助设置",
@@ -2058,7 +2129,214 @@ private fun StreamingViewContent(
                 onDismiss = { showVolumeDialog = false }
             )
         }
+
+        // Remote Screen Orientation and Adaptive Strategy Dialog
+        if (showOrientationDialog) {
+            RemoteOrientationControlDialog(
+                controller = controller,
+                config = config,
+                state = state,
+                onDismiss = { showOrientationDialog = false }
+            )
+        }
     }
+}
+
+@Composable
+fun RemoteOrientationControlDialog(
+    controller: ScrcpyController,
+    config: ScrcpyConfig,
+    state: ScreenState.Streaming,
+    onDismiss: () -> Unit
+) {
+    val isLandscape = state.width > state.height && state.width > 0 && state.height > 0
+    val aspect = if (state.width > 0 && state.height > 0) state.width.toFloat() / state.height.toFloat() else 0.5625f
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.ScreenRotation,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("屏幕方向与自适应", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "实时匹配被控端横竖屏旋转，消除画面拉伸变形",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // 1. Current Remote Screen Status Card
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = "远程分辨率: ${state.width} × ${state.height}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "画面比例: ${String.format(Locale.getDefault(), "%.2f", aspect)}:1 (${if (isLandscape) "横屏显示" else "竖屏显示"})",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isLandscape) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (isLandscape) Icons.Default.StayCurrentLandscape else Icons.Default.StayCurrentPortrait,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isLandscape) "横屏" else "竖屏",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 2. Host Screen Adaptive Strategy Section
+                Text(
+                    text = "主控端自适应策略",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    HostOrientationMode.values().forEach { mode ->
+                        val isSelected = config.hostOrientationMode == mode
+                        Surface(
+                            onClick = {
+                                controller.updateConfig(config.copy(hostOrientationMode = mode))
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = {
+                                        controller.updateConfig(config.copy(hostOrientationMode = mode))
+                                    }
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        text = mode.label,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = mode.shortDesc,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Remote Screen Rotation Control
+                Text(
+                    text = "被控端物理屏幕旋转",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Button(
+                    onClick = {
+                        controller.rotateRemoteDevice()
+                        Toast.makeText(context, "已发送远程屏幕旋转指令", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Rotate90DegreesCw, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("一键旋转被控端屏幕 (+90°)")
+                }
+
+                // Quick Angle Selector Buttons (0°, 90°, 180°, 270°, Auto Sensor)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    listOf(0 to "0° 竖屏", 1 to "90° 横屏", 2 to "180°", 3 to "270°", -1 to "自动感应").forEach { (rot, label) ->
+                        OutlinedButton(
+                            onClick = {
+                                controller.setRemoteOrientation(rot)
+                                Toast.makeText(context, "已切换被控端屏幕方向: $label", Toast.LENGTH_SHORT).show()
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(label, fontSize = 10.sp, maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("关闭")
+            }
+        }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2941,6 +3219,48 @@ fun ScrcpyConfigSettingsSection(
                     controller.updateConfig(config.copy(isAudioEnabled = isChecked))
                 }
             )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // Host Screen Orientation Adaptation Strategy
+        Text(
+            text = "主控端屏幕自适应方向",
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Text(
+            text = "当远端发生横竖屏切换时，主控端画面与屏幕方向的处理方式",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            HostOrientationMode.values().forEach { mode ->
+                val isSelected = config.hostOrientationMode == mode
+                if (isSelected) {
+                    Button(
+                        onClick = { controller.updateConfig(config.copy(hostOrientationMode = mode)) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
+                    ) {
+                        Text(mode.label, fontSize = 11.sp, maxLines = 1, softWrap = false)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { controller.updateConfig(config.copy(hostOrientationMode = mode)) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)
+                    ) {
+                        Text(mode.label, fontSize = 11.sp, maxLines = 1, softWrap = false)
+                    }
+                }
+            }
         }
     }
 }
