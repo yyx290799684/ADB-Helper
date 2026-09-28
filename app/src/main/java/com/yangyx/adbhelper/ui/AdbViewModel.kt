@@ -6,6 +6,8 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.util.Log
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.yangyx.adbhelper.adb.AdbConnection
@@ -19,14 +21,29 @@ import com.yangyx.adbhelper.data.AppDatabase
 import com.yangyx.adbhelper.data.entity.DeviceEntity
 import com.yangyx.adbhelper.data.repository.AdbRepository
 import com.yangyx.adbhelper.scrcpy.ScrcpyController
+import com.yangyx.adbhelper.ui.models.AppAnalysisReport
+import com.yangyx.adbhelper.ui.models.BottomBarMode
+import com.yangyx.adbhelper.ui.models.GlassTranslucency
+import com.yangyx.adbhelper.ui.models.JellySpring
+import com.yangyx.adbhelper.ui.models.LiquidGlassConfig
+import com.yangyx.adbhelper.ui.models.SpecularGlow
+import com.yangyx.adbhelper.ui.models.LocalAppAnalyzer
+import com.yangyx.adbhelper.ui.models.RemoteAppAnalyzer
+import com.yangyx.adbhelper.ui.models.RemoteAppLabelManager
 import com.yangyx.adbhelper.ui.models.GroupedDevice
 import com.yangyx.adbhelper.ui.models.LocalAppItem
 import com.yangyx.adbhelper.ui.models.RemoteAppItem
 import com.yangyx.adbhelper.ui.models.RemoteProcessItem
+import com.yangyx.adbhelper.ui.models.DeviceDensityInfo
 import com.yangyx.adbhelper.ui.models.SystemInfo
+import com.yangyx.adbhelper.ui.models.TouchpadMode
+import com.yangyx.adbhelper.ui.models.TouchpadProtocol
+import com.yangyx.adbhelper.input.VirtualMouseManager
+import com.yangyx.adbhelper.input.VirtualMouseStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -195,6 +212,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     var scrcpyController: ScrcpyController? = null
         private set
 
+    // 虚拟硬件鼠标驱动管理器 (Linux UHID / UINPUT 原生硬件鼠标模拟，唤出原生指针)
+    val virtualMouseManager = VirtualMouseManager({ activeConnection }, viewModelScope)
+    val virtualMouseStatus: StateFlow<VirtualMouseStatus> = virtualMouseManager.status
+
     // File Explorer state
     private val _currentRemotePath = MutableStateFlow("/sdcard")
     val currentRemotePath: StateFlow<String> = _currentRemotePath.asStateFlow()
@@ -214,8 +235,43 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     val fileClipboard: StateFlow<FileClipboard?> = _fileClipboard.asStateFlow()
 
     // Terminal state
+    companion object {
+        const val MAX_TERMINAL_BUFFER_LINES = 6000
+    }
+
     private val _terminalOutput = MutableStateFlow("ADB Helper Terminal\nReady for input...\n\nshell@android:/ $ ")
     val terminalOutput: StateFlow<String> = _terminalOutput.asStateFlow()
+
+    private fun trimTerminalBufferIfNeeded(content: String): String {
+        val newlineCount = content.count { it == '\n' }
+        if (newlineCount > MAX_TERMINAL_BUFFER_LINES + 500) {
+            val dropCount = newlineCount - MAX_TERMINAL_BUFFER_LINES
+            var currentNewlines = 0
+            var splitIndex = -1
+            for (i in content.indices) {
+                if (content[i] == '\n') {
+                    currentNewlines++
+                    if (currentNewlines >= dropCount) {
+                        splitIndex = i + 1
+                        break
+                    }
+                }
+            }
+            if (splitIndex in 1 until content.length) {
+                return "[已自动回收较早历史输出，保留最新 $MAX_TERMINAL_BUFFER_LINES 行以维持流畅]\n" + content.substring(splitIndex)
+            }
+        }
+        return content
+    }
+
+    fun setTerminalOutput(text: String) {
+        _terminalOutput.value = trimTerminalBufferIfNeeded(text)
+    }
+
+    fun appendTerminalOutput(textToAppend: String) {
+        val curr = _terminalOutput.value
+        _terminalOutput.value = trimTerminalBufferIfNeeded(curr + textToAppend)
+    }
 
     private val _isRootMode = MutableStateFlow(false)
     val isRootMode: StateFlow<Boolean> = _isRootMode.asStateFlow()
@@ -224,6 +280,69 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     val terminalPath: StateFlow<String> = _terminalPath.asStateFlow()
 
     private val prefs = application.getSharedPreferences("terminal_shortcuts_prefs", android.content.Context.MODE_PRIVATE)
+    private val uiPrefs = application.getSharedPreferences("ui_theme_prefs", android.content.Context.MODE_PRIVATE)
+
+    // Bottom Navigation Bar Mode (Classic M3 vs Kyant0-inspired Liquid Glass)
+    private val _bottomBarMode = MutableStateFlow<BottomBarMode>(loadBottomBarModeFromPrefs())
+    val bottomBarMode: StateFlow<BottomBarMode> = _bottomBarMode.asStateFlow()
+
+    private val _liquidGlassConfig = MutableStateFlow<LiquidGlassConfig>(loadLiquidGlassConfigFromPrefs())
+    val liquidGlassConfig: StateFlow<LiquidGlassConfig> = _liquidGlassConfig.asStateFlow()
+
+    fun setBottomBarMode(mode: BottomBarMode) {
+        _bottomBarMode.value = mode
+        uiPrefs.edit().putString("bottom_bar_mode", mode.name).apply()
+    }
+
+    fun setLiquidGlassConfig(config: LiquidGlassConfig) {
+        _liquidGlassConfig.value = config
+        uiPrefs.edit()
+            .putString("glass_translucency", config.translucency.name)
+            .putString("glass_specular", config.specularGlow.name)
+            .putString("glass_spring", config.jellySpring.name)
+            .apply()
+    }
+
+    private fun loadBottomBarModeFromPrefs(): BottomBarMode {
+        val saved = uiPrefs.getString("bottom_bar_mode", BottomBarMode.LIQUID_GLASS.name)
+        return try {
+            BottomBarMode.valueOf(saved ?: BottomBarMode.LIQUID_GLASS.name)
+        } catch (_: Exception) {
+            BottomBarMode.LIQUID_GLASS
+        }
+    }
+
+    private fun loadLiquidGlassConfigFromPrefs(): LiquidGlassConfig {
+        val trans = try {
+            GlassTranslucency.valueOf(
+                uiPrefs.getString("glass_translucency", GlassTranslucency.BALANCED.name) ?: GlassTranslucency.BALANCED.name
+            )
+        } catch (_: Exception) {
+            GlassTranslucency.BALANCED
+        }
+
+        val spec = try {
+            SpecularGlow.valueOf(
+                uiPrefs.getString("glass_specular", SpecularGlow.VIBRANT.name) ?: SpecularGlow.VIBRANT.name
+            )
+        } catch (_: Exception) {
+            SpecularGlow.VIBRANT
+        }
+
+        val spring = try {
+            JellySpring.valueOf(
+                uiPrefs.getString("glass_spring", JellySpring.BOUNCY.name) ?: JellySpring.BOUNCY.name
+            )
+        } catch (_: Exception) {
+            JellySpring.BOUNCY
+        }
+
+        return LiquidGlassConfig(
+            translucency = trans,
+            specularGlow = spec,
+            jellySpring = spring
+        )
+    }
 
     private val defaultShortcuts = listOf(
         "getprop ro.product.model",
@@ -246,6 +365,104 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _appDiagnosisLogs = MutableStateFlow<String>("暂未执行应用列表分析。点击刷新按钮可重新加载并生成日志。")
     val appDiagnosisLogs: StateFlow<String> = _appDiagnosisLogs.asStateFlow()
+
+    // =========================================================================
+    // UI 页面状态持久保持 (设备、应用、进程页面的选项卡、滚动位置与筛选状态)
+    // 离开页面切换到投屏等其它 Tab 时保留，当重新连接新设备后重置
+    // =========================================================================
+
+    // 设备页状态 (DeviceScreen)
+    private val _deviceSelectedTabIndex = MutableStateFlow(0) // 0: 信息, 1: 控制, 2: 输入
+    val deviceSelectedTabIndex: StateFlow<Int> = _deviceSelectedTabIndex.asStateFlow()
+
+    private val _deviceInfoListState = MutableStateFlow(LazyListState())
+    val deviceInfoListState: StateFlow<LazyListState> = _deviceInfoListState.asStateFlow()
+
+    private val _deviceControlListState = MutableStateFlow(LazyListState())
+    val deviceControlListState: StateFlow<LazyListState> = _deviceControlListState.asStateFlow()
+
+    private val _deviceInputListState = MutableStateFlow(LazyListState())
+    val deviceInputListState: StateFlow<LazyListState> = _deviceInputListState.asStateFlow()
+
+    private val _deviceInputText = MutableStateFlow("")
+    val deviceInputText: StateFlow<String> = _deviceInputText.asStateFlow()
+
+    private val _deviceCustomKeyCode = MutableStateFlow("")
+    val deviceCustomKeyCode: StateFlow<String> = _deviceCustomKeyCode.asStateFlow()
+
+    private val _deviceCustomKeyIsLongPress = MutableStateFlow(false)
+    val deviceCustomKeyIsLongPress: StateFlow<Boolean> = _deviceCustomKeyIsLongPress.asStateFlow()
+
+    fun setDeviceSelectedTabIndex(index: Int) {
+        _deviceSelectedTabIndex.value = index
+    }
+
+    fun setDeviceInputText(text: String) {
+        _deviceInputText.value = text
+    }
+
+    fun setDeviceCustomKeyCode(code: String) {
+        _deviceCustomKeyCode.value = code
+    }
+
+    fun setDeviceCustomKeyIsLongPress(isLong: Boolean) {
+        _deviceCustomKeyIsLongPress.value = isLong
+    }
+
+    // 应用与进程页状态 (AppAndProcessScreen)
+    private val _appProcessSelectedTabIndex = MutableStateFlow(0) // 0: 应用管理, 1: 进程管理
+    val appProcessSelectedTabIndex: StateFlow<Int> = _appProcessSelectedTabIndex.asStateFlow()
+
+    private val _appsListState = MutableStateFlow(LazyListState())
+    val appsListState: StateFlow<LazyListState> = _appsListState.asStateFlow()
+
+    private val _processListState = MutableStateFlow(LazyListState())
+    val processListState: StateFlow<LazyListState> = _processListState.asStateFlow()
+
+    private val _appSearchQuery = MutableStateFlow("")
+    val appSearchQuery: StateFlow<String> = _appSearchQuery.asStateFlow()
+
+    private val _appShowSystemApps = MutableStateFlow(false)
+    val appShowSystemApps: StateFlow<Boolean> = _appShowSystemApps.asStateFlow()
+
+    private val _processFilterMode = MutableStateFlow(0) // 0: 仅第三方应用, 1: 包含系统应用, 2: 全部进程
+    val processFilterMode: StateFlow<Int> = _processFilterMode.asStateFlow()
+
+    fun setAppProcessSelectedTabIndex(index: Int) {
+        _appProcessSelectedTabIndex.value = index
+    }
+
+    fun setAppSearchQuery(query: String) {
+        _appSearchQuery.value = query
+    }
+
+    fun setAppShowSystemApps(show: Boolean) {
+        _appShowSystemApps.value = show
+    }
+
+    fun setProcessFilterMode(mode: Int) {
+        _processFilterMode.value = mode
+    }
+
+    /**
+     * 重置设备页面与应用/进程页面的所有状态与滚动位置 (当重新连接新设备或断开连接时触发)
+     */
+    fun resetUiPageStates() {
+        _deviceSelectedTabIndex.value = 0
+        _deviceInfoListState.value = LazyListState(0, 0)
+        _deviceControlListState.value = LazyListState(0, 0)
+        _deviceInputListState.value = LazyListState(0, 0)
+        _deviceInputText.value = ""
+        _deviceCustomKeyCode.value = ""
+        _deviceCustomKeyIsLongPress.value = false
+
+        _appProcessSelectedTabIndex.value = 0
+        _appsListState.value = LazyListState(0, 0)
+        _processListState.value = LazyListState(0, 0)
+        _appSearchQuery.value = ""
+        _appShowSystemApps.value = false
+        _processFilterMode.value = 0
+    }
 
     fun setRootMode(enabled: Boolean) {
         _isRootMode.value = enabled
@@ -365,6 +582,9 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     private val _systemInfo = MutableStateFlow(SystemInfo())
     val systemInfo: StateFlow<SystemInfo> = _systemInfo.asStateFlow()
 
+    private val _deviceDensity = MutableStateFlow(DeviceDensityInfo())
+    val deviceDensity: StateFlow<DeviceDensityInfo> = _deviceDensity.asStateFlow()
+
     private val _isRefreshingSystemInfo = MutableStateFlow(false)
     val isRefreshingSystemInfo: StateFlow<Boolean> = _isRefreshingSystemInfo.asStateFlow()
 
@@ -396,6 +616,21 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isLocalAppsLoading = MutableStateFlow(false)
     val isLocalAppsLoading: StateFlow<Boolean> = _isLocalAppsLoading.asStateFlow()
+
+    // Local Installed 3rd-party Apps Deep Analysis Report
+    private val _appAnalysisReport = MutableStateFlow<AppAnalysisReport?>(null)
+    val appAnalysisReport: StateFlow<AppAnalysisReport?> = _appAnalysisReport.asStateFlow()
+
+    private val _isAppAnalysisScanning = MutableStateFlow(false)
+    val isAppAnalysisScanning: StateFlow<Boolean> = _isAppAnalysisScanning.asStateFlow()
+
+    private val _appAnalysisProgress = MutableStateFlow(0f)
+    val appAnalysisProgress: StateFlow<Float> = _appAnalysisProgress.asStateFlow()
+
+    private val _appAnalysisStatus = MutableStateFlow("")
+    val appAnalysisStatus: StateFlow<String> = _appAnalysisStatus.asStateFlow()
+
+    private var appAnalysisJob: Job? = null
 
     private val _actionMessage = MutableStateFlow<String?>(null)
     val actionMessage: StateFlow<String?> = _actionMessage.asStateFlow()
@@ -537,6 +772,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         cachedStaticInfo = null
         _isRefreshingSystemInfo.value = false
         _systemInfo.value = SystemInfo()
+        _deviceDensity.value = DeviceDensityInfo()
         _installedApps.value = emptyList()
         _isAppLoading.value = false
         _appLoadingProgress.value = 0f
@@ -549,6 +785,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         _fileClipboard.value = null
         _currentInstallTask.value = null
         _currentDownloadTask.value = null
+        resetUiPageStates()
     }
 
     private suspend fun isPortReachable(ip: String, port: Int, timeoutMs: Int = 1000): Boolean = kotlinx.coroutines.withContext(Dispatchers.IO) {
@@ -950,6 +1187,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
         scrcpyController?.stopMirroring()
         scrcpyController = null
+        virtualMouseManager.disconnect()
         activeConnection?.disconnect()
         activeConnection = null
         _connectionState.value = ConnectionState.Disconnected
@@ -973,6 +1211,385 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             kotlinx.coroutines.delay(1200)
             disconnect()
             onFinished?.invoke()
+        }
+    }
+
+    /**
+     * 获取设备屏幕 DPI (wm density) 与分辨率 (wm size)
+     */
+    fun fetchDeviceDensity() {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            _deviceDensity.value = _deviceDensity.value.copy(isLoading = true)
+            try {
+                val densityOutput = conn.executeShell("wm density")
+                val sizeOutput = conn.executeShell("wm size")
+
+                var physicalDpi = 0
+                var overrideDpi: Int? = null
+                Regex("Physical density:\\s*(\\d+)").find(densityOutput)?.let {
+                    physicalDpi = it.groupValues[1].toIntOrNull() ?: 0
+                }
+                Regex("Override density:\\s*(\\d+)").find(densityOutput)?.let {
+                    overrideDpi = it.groupValues[1].toIntOrNull()
+                }
+
+                var physicalSize = ""
+                var overrideSize: String? = null
+                Regex("Physical size:\\s*([0-9xX]+)").find(sizeOutput)?.let {
+                    physicalSize = it.groupValues[1]
+                }
+                Regex("Override size:\\s*([0-9xX]+)").find(sizeOutput)?.let {
+                    overrideSize = it.groupValues[1]
+                }
+
+                _deviceDensity.value = DeviceDensityInfo(
+                    physicalDpi = physicalDpi,
+                    overrideDpi = overrideDpi,
+                    physicalSize = physicalSize,
+                    overrideSize = overrideSize,
+                    isLoading = false
+                )
+            } catch (e: Exception) {
+                _deviceDensity.value = _deviceDensity.value.copy(isLoading = false)
+            }
+        }
+    }
+
+    /**
+     * 修改设备 DPI (wm density <newDpi>)
+     */
+    fun setDeviceDensity(newDpi: Int) {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备，无法修改 DPI"
+            return
+        }
+        if (newDpi !in 72..1000) {
+            _actionMessage.value = "请输入合理的 DPI 数值 (72 ~ 1000)"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _deviceDensity.value = _deviceDensity.value.copy(isLoading = true)
+            try {
+                conn.executeShell("wm density $newDpi")
+                _actionMessage.value = "已将设备 DPI 设置为 $newDpi"
+            } catch (e: Exception) {
+                _actionMessage.value = "设置 DPI 失败: ${e.message}"
+            }
+            fetchDeviceDensity()
+        }
+    }
+
+    /**
+     * 重置设备 DPI 到默认物理值 (wm density reset)
+     */
+    fun resetDeviceDensity() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备，无法重置 DPI"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _deviceDensity.value = _deviceDensity.value.copy(isLoading = true)
+            try {
+                conn.executeShell("wm density reset")
+                _actionMessage.value = "已重置设备 DPI 为默认物理值"
+            } catch (e: Exception) {
+                _actionMessage.value = "重置 DPI 失败: ${e.message}"
+            }
+            fetchDeviceDensity()
+        }
+    }
+
+    /**
+     * 向设备发送文本输入 (input text <text>)
+     */
+    fun sendInputText(text: String) {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备，无法发送输入"
+            return
+        }
+        if (text.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // adb shell input text 中，空格需转为 %s，特殊字符需转义
+                val escaped = text.replace(" ", "%s")
+                    .replace("\\", "\\\\")
+                    .replace("\"", "\\\"")
+                    .replace("'", "\\'")
+                    .replace("$", "\\$")
+                    .replace("&", "\\&")
+                    .replace(";", "\\;")
+                    .replace("(", "\\(")
+                    .replace(")", "\\)")
+                    .replace("<", "\\<")
+                    .replace(">", "\\>")
+                    .replace("|", "\\|")
+                    .replace("`", "\\`")
+                conn.executeShell("input text \"$escaped\"")
+                _actionMessage.value = "已向远端发送文本"
+            } catch (e: Exception) {
+                _actionMessage.value = "发送文本失败: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * 向设备发送按键模拟 (input keyevent <keyCode>)
+     * 支持长按：如电源键长按呼出关机菜单 (input keyevent --longpress 26)
+     */
+    fun sendInputKeyEvent(keyCode: Int, keyName: String? = null, isLongPress: Boolean = false) {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备，无法发送按键"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cmd = if (isLongPress) "input keyevent --longpress $keyCode" else "input keyevent $keyCode"
+                conn.executeShell(cmd)
+                _actionMessage.value = "已触发${if (isLongPress) "长按" else ""}: ${keyName ?: "KeyCode $keyCode"}"
+            } catch (e: Exception) {
+                _actionMessage.value = "发送按键失败: ${e.message}"
+            }
+        }
+    }
+
+    private var lastTouchpadMoveTimestamp = 0L
+
+    /**
+     * 触控板滑动移动指令 (支持原生硬件鼠标 UHID/Uinput, input mouse move, input mouse roll, input roll)
+     */
+    fun sendTouchpadMove(
+        x: Int,
+        y: Int,
+        dx: Int,
+        dy: Int,
+        protocol: TouchpadProtocol = TouchpadProtocol.VIRTUAL_MOUSE
+    ) {
+        // 如果虚拟硬件鼠标已连接，或当前协议指定为原生硬件鼠标
+        if (protocol == TouchpadProtocol.VIRTUAL_MOUSE || virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            if (virtualMouseStatus.value is VirtualMouseStatus.Disconnected) {
+                // 用户首次在原生模式下滑动，自动触发连接
+                virtualMouseManager.connect()
+            }
+            virtualMouseManager.move(dx, dy)
+            return
+        }
+
+        val conn = activeConnection ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastTouchpadMoveTimestamp < 35L) return
+        lastTouchpadMoveTimestamp = now
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cmd = when (protocol) {
+                    TouchpadProtocol.VIRTUAL_MOUSE -> ""
+                    TouchpadProtocol.MOUSE_MOVE -> "input mouse move $x $y"
+                    TouchpadProtocol.MOUSE_ROLL -> "input mouse roll $dx $dy"
+                    TouchpadProtocol.ROLL -> "input roll $dx $dy"
+                }
+                if (cmd.isNotEmpty()) {
+                    conn.executeShell(cmd)
+                }
+            } catch (_: Exception) {
+                // 移动事件高频发送，忽略单次非致命网络抖动
+            }
+        }
+    }
+
+    /**
+     * 触控板单击事件 (优先使用原生鼠标左键点击，未连接则回退为 input tap)
+     */
+    fun sendTouchpadTap(x: Int, y: Int, useMouse: Boolean = false) {
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            virtualMouseManager.leftClick()
+            return
+        }
+
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cmd = if (useMouse) "input mouse tap $x $y" else "input tap $x $y"
+                conn.executeShell(cmd)
+            } catch (e: Exception) {
+                _actionMessage.value = "点击失败: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * 触控板双击事件
+     */
+    fun sendTouchpadDoubleTap(x: Int, y: Int) {
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            virtualMouseManager.doubleClick()
+            return
+        }
+
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("input tap $x $y; sleep 0.1; input tap $x $y")
+            } catch (e: Exception) {
+                _actionMessage.value = "双击失败: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * 触控板长按事件 (通过 swipe 原地长按模拟)
+     */
+    fun sendTouchpadLongPress(x: Int, y: Int, durationMs: Int = 800) {
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            viewModelScope.launch(Dispatchers.IO) {
+                virtualMouseManager.pressButton(1)
+                delay(durationMs.toLong())
+                virtualMouseManager.releaseButton(1)
+            }
+            return
+        }
+
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("input swipe $x $y $x $y $durationMs")
+            } catch (e: Exception) {
+                _actionMessage.value = "长按失败: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * 触控板右键点击 (在 Android 中通常响应为返回键或上下文菜单)
+     */
+    fun sendTouchpadRightClick() {
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            virtualMouseManager.rightClick()
+        } else {
+            sendInputKeyEvent(4, "返回 (右键)")
+        }
+    }
+
+    /**
+     * 触控板中键点击 (向内核发送鼠标中键事件)
+     */
+    fun sendTouchpadMiddleClick() {
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            viewModelScope.launch(Dispatchers.IO) {
+                virtualMouseManager.pressButton(4)
+                delay(50)
+                virtualMouseManager.releaseButton(4)
+            }
+        }
+    }
+
+    /**
+     * 触控板滚轮滚动 (正数为向上滚动，负数为向下滚动)
+     */
+    fun sendTouchpadScroll(delta: Int, screenWidth: Int = 1080, screenHeight: Int = 2400) {
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            virtualMouseManager.scroll(delta)
+        } else {
+            val fromY = if (delta > 0) (screenHeight * 0.7f).toInt() else (screenHeight * 0.3f).toInt()
+            val toY = if (delta > 0) (screenHeight * 0.3f).toInt() else (screenHeight * 0.7f).toInt()
+            sendTouchpadSwipe(screenWidth / 2, fromY, screenWidth / 2, toY, 200)
+        }
+    }
+
+    /**
+     * 触控板手势滑动事件 (input swipe x1 y1 x2 y2 duration)
+     */
+    fun sendTouchpadSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int = 250) {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("input swipe $x1 $y1 $x2 $y2 $durationMs")
+            } catch (e: Exception) {
+                _actionMessage.value = "滑动失败: ${e.message}"
+            }
+        }
+    }
+
+    private val _isRemoteShowTouches = MutableStateFlow(false)
+    val isRemoteShowTouches: StateFlow<Boolean> = _isRemoteShowTouches.asStateFlow()
+
+    private val _isRemotePointerLocation = MutableStateFlow(false)
+    val isRemotePointerLocation: StateFlow<Boolean> = _isRemotePointerLocation.asStateFlow()
+
+    private val _uhidSupportStatus = MutableStateFlow<String?>(null)
+    val uhidSupportStatus: StateFlow<String?> = _uhidSupportStatus.asStateFlow()
+
+    fun queryVisualIndicators() {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val touches = conn.executeShell("settings get system show_touches").trim()
+                _isRemoteShowTouches.value = (touches == "1")
+                val pointer = conn.executeShell("settings get system pointer_location").trim()
+                _isRemotePointerLocation.value = (pointer == "1")
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun setRemoteShowTouches(enable: Boolean) {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("settings put system show_touches ${if (enable) 1 else 0}")
+                _isRemoteShowTouches.value = enable
+                _actionMessage.value = if (enable) "已开启远端触控圆点指示 (show_touches)" else "已关闭远端触控圆点指示"
+            } catch (e: Exception) {
+                _actionMessage.value = "设置失败: ${e.message}"
+            }
+        }
+    }
+
+    fun setRemotePointerLocation(enable: Boolean) {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("settings put system pointer_location ${if (enable) 1 else 0}")
+                _isRemotePointerLocation.value = enable
+                _actionMessage.value = if (enable) "已开启远端指针十字准星与轨迹 (pointer_location)" else "已关闭远端指针十字准星"
+            } catch (e: Exception) {
+                _actionMessage.value = "设置失败: ${e.message}"
+            }
+        }
+    }
+
+    fun detectUhidSupport() {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val uhidCheck = conn.executeShell("test -c /dev/uhid && (test -w /dev/uhid && echo 'UHID_RW' || echo 'UHID_EXISTS_RO') || echo 'UHID_NONE'").trim()
+                val uinputCheck = conn.executeShell("test -c /dev/uinput && (test -w /dev/uinput && echo 'UINPUT_RW' || echo 'UINPUT_EXISTS_RO') || echo 'UINPUT_NONE'").trim()
+                val apiLevel = conn.executeShell("getprop ro.build.version.sdk").trim().toIntOrNull() ?: 0
+                val isRoot = conn.executeShell("which su 2>/dev/null; id").contains("uid=0")
+
+                val status = buildString {
+                    when {
+                        uhidCheck.contains("UHID_RW") -> {
+                            append("✅ 支持 /dev/uhid 虚拟硬件！当前 ADB Shell 用户具备直接写入权限（Android API $apiLevel），可免 Root 模拟原生硬件鼠标光标。")
+                        }
+                        uhidCheck.contains("UHID_EXISTS_RO") -> {
+                            if (isRoot) {
+                                append("⚠️ /dev/uhid 存在但 Shell 默认只读（Android API $apiLevel）。检测到设备具备 Root 权限，可提权运行虚拟鼠标。")
+                            } else {
+                                append("⚠️ /dev/uhid 存在但 Shell 权限受限（Android API $apiLevel < 13）。通常需要 Android 13+ 或 Root 权限才能开放 /dev/uhid 写入。")
+                            }
+                        }
+                        uinputCheck.contains("UINPUT_RW") -> {
+                            append("✅ 支持 /dev/uinput！具备写入权限，可直接注册 uinput 虚拟鼠标。")
+                        }
+                        else -> {
+                            append("ℹ️ 设备 /dev/uhid 权限受限。建议开启下方「触控小白点」或「十字准星」作为即时视觉光标替代方案。")
+                        }
+                    }
+                }
+                _uhidSupportStatus.value = status
+            } catch (e: Exception) {
+                _uhidSupportStatus.value = "检测失败: ${e.message}"
+            }
         }
     }
 
@@ -1181,6 +1798,35 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun readRemoteBinaryFile(path: String, onProgress: (Long) -> Unit = {}, onResult: (Result<ByteArray>) -> Unit): kotlinx.coroutines.Job? {
+        val conn = activeConnection
+        if (conn == null) {
+            onResult(Result.failure(Exception("设备未连接")))
+            return null
+        }
+        return viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val syncClient = AdbSyncClient(conn)
+                val bytes = syncClient.readBinaryFile(
+                    remotePath = path,
+                    isCancelled = { !coroutineContext.isActive },
+                    onProgress = { transferred ->
+                        launch(Dispatchers.Main) {
+                            onProgress(transferred)
+                        }
+                    }
+                )
+                withContext(Dispatchers.Main) {
+                    onResult(Result.success(bytes))
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onResult(Result.failure(e))
+                }
+            }
+        }
+    }
+
     fun saveRemoteTextFile(path: String, content: String, onResult: (Result<Unit>) -> Unit) {
         val conn = activeConnection
         if (conn == null) {
@@ -1372,13 +2018,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
         if (trimmed.isEmpty()) {
             val out = _terminalOutput.value
-            _terminalOutput.value = if (out.endsWith(currentPrompt)) {
+            setTerminalOutput(if (out.endsWith(currentPrompt)) {
                 out.removeSuffix(currentPrompt) + "$currentPrompt\n$currentPrompt"
             } else if (out.endsWith("\n") || out.isEmpty()) {
                 "$out$currentPrompt"
             } else {
                 "$out\n$currentPrompt"
-            }
+            })
             return
         }
 
@@ -1392,7 +2038,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         val conn = activeConnection ?: run {
             val out = _terminalOutput.value
             val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
-            _terminalOutput.value = out + prefix + "[错误] 设备未连接，请先在连接页面建立 ADB 连接。\n$currentPrompt"
+            setTerminalOutput(out + prefix + "[错误] 设备未连接，请先在连接页面建立 ADB 连接。\n$currentPrompt")
             return
         }
 
@@ -1400,7 +2046,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             _isRootMode.value = true
             val out = _terminalOutput.value
             val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
-            _terminalOutput.value = out + prefix + "[Context] 已切换为 Root 账户 (uid=0)，后续指令将自动以 root 权限执行。\nroot@android:$currentPath # "
+            setTerminalOutput(out + prefix + "[Context] 已切换为 Root 账户 (uid=0)，后续指令将自动以 root 权限执行。\nroot@android:$currentPath # ")
             return
         }
 
@@ -1409,10 +2055,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
             if (isRoot) {
                 _isRootMode.value = false
-                _terminalOutput.value = out + prefix + "[Context] 已退出 root 账户，恢复普通 shell 用户 (uid=2000)。\nshell@android:$currentPath $ "
+                setTerminalOutput(out + prefix + "[Context] 已退出 root 账户，恢复普通 shell 用户 (uid=2000)。\nshell@android:$currentPath $ ")
             } else {
                 _terminalPath.value = "/"
-                _terminalOutput.value = out + prefix + "[Context] 终端会话重置。\nshell@android:/ $ "
+                setTerminalOutput(out + prefix + "[Context] 终端会话重置。\nshell@android:/ $ ")
             }
             return
         }
@@ -1420,7 +2066,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val out = _terminalOutput.value
             val prefix = if (out.endsWith(currentPrompt)) "$command\n" else "\n$currentPrompt$command\n"
-            _terminalOutput.value = out + prefix
+            setTerminalOutput(out + prefix)
 
             val execCmd = if (trimmed.startsWith("cd ") || trimmed == "cd") {
                 val target = if (trimmed == "cd" || trimmed == "cd ~") "/sdcard" else trimmed.removePrefix("cd ").trim().removeSurrounding("\"").removeSurrounding("'")
@@ -1455,16 +2101,16 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     if (!newDir.isNullOrBlank()) {
                         _terminalPath.value = newDir
                     } else if (res.isNotBlank()) {
-                        _terminalOutput.value += if (res.endsWith("\n")) res else "$res\n"
+                        appendTerminalOutput(if (res.endsWith("\n")) res else "$res\n")
                     }
                 } else {
                     if (res.isNotBlank()) {
-                        _terminalOutput.value += if (res.endsWith("\n")) res else "$res\n"
+                        appendTerminalOutput(if (res.endsWith("\n")) res else "$res\n")
                     }
                 }
                 repository.saveCommand(conn.ip, command, true)
             } catch (e: Exception) {
-                _terminalOutput.value += "Error: ${e.message}\n"
+                appendTerminalOutput("Error: ${e.message}\n")
                 repository.saveCommand(conn.ip, command, false)
             } finally {
                 val latestIsRoot = _isRootMode.value
@@ -1473,7 +2119,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 val latestPath = _terminalPath.value
                 val latestPrompt = "$latestUser@android:$latestPath $latestChar "
                 val curr = _terminalOutput.value
-                _terminalOutput.value = if (curr.endsWith("\n") || curr.isEmpty()) "$curr$latestPrompt" else "$curr\n$latestPrompt"
+                setTerminalOutput(if (curr.endsWith("\n") || curr.isEmpty()) "$curr$latestPrompt" else "$curr\n$latestPrompt")
             }
         }
     }
@@ -1538,7 +2184,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     val currentPath = _terminalPath.value
                     val userLabel = if (isRoot) "root" else "shell"
                     val promptChar = if (isRoot) "#" else "$"
-                    _terminalOutput.value += "\n$userLabel@android:$currentPath $promptChar $currentText\n" + matchedCmds.joinToString("  ") + "\n$userLabel@android:$currentPath $promptChar "
+                    appendTerminalOutput("\n$userLabel@android:$currentPath $promptChar $currentText\n" + matchedCmds.joinToString("  ") + "\n$userLabel@android:$currentPath $promptChar ")
                     return@withContext null
                 }
             }
@@ -1610,7 +2256,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     // Show candidates in terminal
                     val userLabel = if (isRoot) "root" else "shell"
                     val promptChar = if (isRoot) "#" else "$"
-                    _terminalOutput.value += "\n$userLabel@android:$workingDir $promptChar $currentText\n" + items.joinToString("  ") + "\n$userLabel@android:$workingDir $promptChar "
+                    appendTerminalOutput("\n$userLabel@android:$workingDir $promptChar $currentText\n" + items.joinToString("  ") + "\n$userLabel@android:$workingDir $promptChar ")
                     return@withContext null
                 }
             }
@@ -1917,6 +2563,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     storageTotalGb = dynamic.storageTotalGb,
                     storageUsedGb = dynamic.storageUsedGb
                 )
+                // 同步读取 DPI 与屏幕尺寸
+                fetchDeviceDensity()
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
@@ -2027,7 +2675,21 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 // Step 3: Fetch 3rd-party user applications
                 log("3. 获取第三方应用列表与 APK 路径 (pm list packages -3 -f)...")
                 val pmListCmd = "pm list packages -3 -f"
-                val userAppsRaw = conn.executeShell("$pmListCmd 2>&1").trim()
+                var userAppsRaw = conn.executeShell("$pmListCmd 2>&1").trim()
+                
+                var usedFallbackForUserApps = false
+                if (userAppsRaw.lines().none { it.trim().startsWith("package:") }) {
+                    usedFallbackForUserApps = true
+                    log("⚠️ 提示: 'pm list packages -3 -f' 无有效输出 (返回: '${userAppsRaw.take(120)}')，部分设备可能未配置 pm 或系统权限受限")
+                    log("🔄 正在尝试使用备用命令 'cmd package list packages -3 -f' 获取第三方应用...")
+                    val cmdFallback = conn.executeShell("cmd package list packages -3 -f 2>&1").trim()
+                    if (cmdFallback.lines().any { it.trim().startsWith("package:") }) {
+                        log("✓ 'cmd package list packages -3 -f' 备用命令成功获取到第三方应用列表！")
+                        userAppsRaw = cmdFallback
+                    } else {
+                        log("⚠️ 'cmd package list packages -3 -f' 也未检测到有效输出 (返回: '${cmdFallback.take(120)}')")
+                    }
+                }
                 
                 data class AppApkEntry(val pkg: String, val apk: String)
                 val userAppsList = mutableListOf<AppApkEntry>()
@@ -2035,15 +2697,19 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     val trimmed = line.trim()
                     if (trimmed.startsWith("package:")) {
                         val withoutPrefix = trimmed.removePrefix("package:")
-                        val apk = withoutPrefix.substringBeforeLast("=")
-                        val pkg = withoutPrefix.substringAfterLast("=")
-                        if (pkg.isNotEmpty() && apk.isNotEmpty()) {
-                            userAppsList.add(AppApkEntry(pkg, apk))
+                        if (withoutPrefix.contains("=")) {
+                            val apk = withoutPrefix.substringBeforeLast("=")
+                            val pkg = withoutPrefix.substringAfterLast("=")
+                            if (pkg.isNotEmpty() && apk.isNotEmpty()) {
+                                userAppsList.add(AppApkEntry(pkg, apk))
+                            }
+                        } else if (withoutPrefix.isNotEmpty()) {
+                            userAppsList.add(AppApkEntry(withoutPrefix.trim(), ""))
                         }
                     }
                 }
                 val totalUserApps = userAppsList.size
-                log("检测到第三方应用共 $totalUserApps 个")
+                log("检测到第三方应用共 $totalUserApps 个${if (usedFallbackForUserApps) " (通过 cmd package 备用命令获取)" else ""}")
 
                 if (userAppsList.isNotEmpty()) {
                     // Step 4: Run a standalone diagnostic sample on the 1st app
@@ -2182,6 +2848,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                                     val bestLabel = foundZhCnLabel ?: foundZhLabel ?: foundDefLabel ?: foundAppLabel
                                     if (!bestLabel.isNullOrBlank()) {
                                         labelMap[pkg] = bestLabel
+                                        RemoteAppLabelManager.labelCache[pkg] = bestLabel
                                     } else {
                                         failCount.incrementAndGet()
                                     }
@@ -2262,7 +2929,11 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (dumpsysVersionMap.isEmpty()) {
                     try {
-                        val pmCodeOut = conn.executeShell("pm list packages --show-versioncode 2>/dev/null", 8000)
+                        var pmCodeOut = conn.executeShell("pm list packages --show-versioncode 2>/dev/null", 8000).trim()
+                        if (pmCodeOut.lines().none { it.trim().startsWith("package:") }) {
+                            log("  'pm list packages --show-versioncode' 无输出，尝试 'cmd package list packages --show-versioncode'...")
+                            pmCodeOut = conn.executeShell("cmd package list packages --show-versioncode 2>/dev/null", 8000).trim()
+                        }
                         for (line in pmCodeOut.lines()) {
                             val t = line.trim()
                             if (t.startsWith("package:") && t.contains("versionCode:")) {
@@ -2278,8 +2949,20 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Step 7: Assemble application list
                 _appLoadingStatus.value = "正在组装应用列表..."
-                log("6. 组装第三方应用与系统应用列表...")
-                val systemAppsOut = conn.executeShell("pm list packages -s -f")
+                log("6. 组装第三方应用与系统应用列表 (pm list packages -s -f)...")
+                var systemAppsOut = conn.executeShell("pm list packages -s -f 2>&1").trim()
+                var usedFallbackForSystemApps = false
+                if (systemAppsOut.lines().none { it.trim().startsWith("package:") }) {
+                    usedFallbackForSystemApps = true
+                    log("⚠️ 提示: 'pm list packages -s -f' 无有效输出 (返回: '${systemAppsOut.take(120)}')，正在尝试备用命令 'cmd package list packages -s -f' 获取系统应用...")
+                    val cmdSystemFallback = conn.executeShell("cmd package list packages -s -f 2>&1").trim()
+                    if (cmdSystemFallback.lines().any { it.trim().startsWith("package:") }) {
+                        log("✓ 'cmd package list packages -s -f' 备用命令成功获取到系统应用包列表！")
+                        systemAppsOut = cmdSystemFallback
+                    } else {
+                        log("⚠️ 'cmd package list packages -s -f' 也未检测到有效输出 (返回: '${cmdSystemFallback.take(120)}')")
+                    }
+                }
 
                 val appList = mutableListOf<RemoteAppItem>()
 
@@ -2339,7 +3022,16 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 _installedApps.value = appList.sortedBy { it.appName.lowercase() }
-                log("=== 应用列表加载完成，共 ${appList.size} 个应用 ===")
+                appList.forEach { item ->
+                    if (item.appName.isNotBlank() && item.appName != item.packageName) {
+                        RemoteAppLabelManager.labelCache[item.packageName] = item.appName
+                    }
+                }
+                syncAppAnalysisReportWithLabels(RemoteAppLabelManager.labelCache)
+                val systemCount = appList.count { it.isSystemApp }
+                val thirdPartyCount = appList.size - systemCount
+                val fallbackNote = if (usedFallbackForUserApps || usedFallbackForSystemApps) " [已自动启用 cmd package 兼容模式]" else ""
+                log("=== 应用列表加载完成，共 ${appList.size} 个应用 (第三方: $thirdPartyCount 个, 系统: $systemCount 个)$fallbackNote ===")
                 _actionMessage.value = "已获取 ${appList.size} 个应用信息"
             } catch (e: CancellationException) {
                 log("应用列表解析任务已取消")
@@ -2545,6 +3237,15 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun runRawShell(cmd: String, timeoutMs: Long = 10000): String = withContext(Dispatchers.IO) {
+        val conn = activeConnection ?: return@withContext "未连接设备"
+        try {
+            conn.executeShell(cmd, timeoutMs).trim()
+        } catch (e: Exception) {
+            "执行异常: ${e.message}"
+        }
+    }
+
     // Load installed apps from LOCAL controller device
     fun loadLocalApps(context: Context, force: Boolean = false) {
         if (_isLocalAppsLoading.value && !force) return
@@ -2624,6 +3325,93 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 _isLocalAppsLoading.value = false
             }
         }
+    }
+
+    // Run in-depth remote connected device third-party app statistics & profiling analysis
+    fun runLocalAppAnalysis(context: Context, force: Boolean = false) {
+        val conn = activeConnection
+        if (conn == null || !conn.isConnected) {
+            _actionMessage.value = "请先连接远端 Android 设备后再执行应用分析"
+            _appAnalysisStatus.value = "未连接远端设备"
+            return
+        }
+        if (_isAppAnalysisScanning.value && !force) return
+        if (!force && _appAnalysisReport.value != null) return
+
+        appAnalysisJob?.cancel()
+        appAnalysisJob = viewModelScope.launch(Dispatchers.IO) {
+            _isAppAnalysisScanning.value = true
+            _appAnalysisProgress.value = 0f
+            _appAnalysisStatus.value = "正在检索远端已安装应用..."
+            try {
+                val report = RemoteAppAnalyzer.analyzeRemote(
+                    conn = conn,
+                    context = context,
+                    knownRemoteApps = _installedApps.value,
+                    cachedLabels = RemoteAppLabelManager.labelCache
+                ) { progress, status ->
+                    _appAnalysisProgress.value = progress
+                    _appAnalysisStatus.value = status
+                }
+                _appAnalysisReport.value = report
+
+                // If _installedApps has any apps that were missing proper names, enrich them from the analysis result!
+                val curApps = _installedApps.value
+                if (curApps.isNotEmpty()) {
+                    var changed = false
+                    val updated = curApps.map { item ->
+                        val newLabel = RemoteAppLabelManager.labelCache[item.packageName]
+                        if (newLabel != null && (item.appName.isBlank() || item.appName == item.packageName)) {
+                            changed = true
+                            item.copy(appName = newLabel)
+                        } else {
+                            item
+                        }
+                    }
+                    if (changed) {
+                        _installedApps.value = updated.sortedBy { it.appName.lowercase() }
+                    }
+                }
+
+                _actionMessage.value = "远端应用分析完成，共统计 ${report.thirdPartyApps.size} 款第三方应用"
+            } catch (e: CancellationException) {
+                // Cancelled
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _actionMessage.value = "远端应用分析失败: ${e.message}"
+            } finally {
+                _isAppAnalysisScanning.value = false
+            }
+        }
+    }
+
+    private fun syncAppAnalysisReportWithLabels(labels: Map<String, String>) {
+        val curReport = _appAnalysisReport.value ?: return
+        var hasDiff = false
+
+        fun updateItem(item: com.yangyx.adbhelper.ui.models.AppAnalysisItem): com.yangyx.adbhelper.ui.models.AppAnalysisItem {
+            val newName = labels[item.packageName]
+            return if (newName != null && newName.isNotBlank() && newName != item.appName) {
+                hasDiff = true
+                item.copy(appName = newName)
+            } else {
+                item
+            }
+        }
+
+        val newAll = curReport.allScannedApps.map(::updateItem)
+        if (!hasDiff) return
+
+        val newThird = curReport.thirdPartyApps.map(::updateItem)
+        val newLargest = curReport.largestApps.map(::updateItem)
+        val newHungry = curReport.permissionHungryApps.map(::updateItem)
+
+        _appAnalysisReport.value = curReport.copy(
+            allScannedApps = newAll,
+            thirdPartyApps = newThird,
+            largestApps = newLargest,
+            permissionHungryApps = newHungry
+        )
     }
 
     // Install an app extracted from the LOCAL controller device to the REMOTE target device
@@ -3058,7 +3846,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         refreshProcessesJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 // Fetch running processes via ps
-                var psOutput = conn.executeShell("ps -A -o USER,PID,PPID,VSZ,RSS,NAME,ARGS 2>/dev/null || ps -ef 2>/dev/null || ps -A 2>/dev/null")
+                var psOutput = conn.executeShell("ps -ef 2>/dev/null || ps -A -o USER,PID,PPID,VSZ,RSS,NAME,ARGS 2>/dev/null || ps -A 2>/dev/null")
                 if (psOutput.isBlank()) {
                     psOutput = conn.executeShell("ps")
                 }
@@ -3077,9 +3865,43 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
                     val user = parts[0]
                     val pid = parts[1].toIntOrNull() ?: continue
-                    val rawName = parts.last()
+
+                    // Parse full command line and executable name
+                    // Standard Android ps -ef format:
+                    // UID PID PPID C STIME TTY TIME CMD [ARGS...]
+                    // e.g.: root 12526 12520 0 14:38:23 136:0 00:00:00 sh /data/adb/service.d/frpc.sh
+                    // e.g.: root 12530 12526 0 14:38:23 136:0 00:00:00 frpc -c /data/adb/service.d/frp/frpc.toml
+                    var cmdline = ""
+                    var exeName = ""
+                    var cmdArgs = ""
+
+                    if (parts.size >= 8 && (parts[4].contains(":") || parts[6].contains(":") || parts[7].contains(":"))) {
+                        // Likely ps -ef output with 7-8 metadata columns
+                        var cmdStartIndex = -1
+                        for (i in 4 until parts.size) {
+                            if (parts[i].matches(Regex("\\d+:\\d+(:\\d+)?"))) {
+                                cmdStartIndex = i + 1
+                            }
+                        }
+                        if (cmdStartIndex in 5 until parts.size) {
+                            cmdline = parts.subList(cmdStartIndex, parts.size).joinToString(" ")
+                            exeName = parts[cmdStartIndex]
+                            if (parts.size > cmdStartIndex + 1) {
+                                cmdArgs = parts.subList(cmdStartIndex + 1, parts.size).joinToString(" ")
+                            }
+                        }
+                    }
+
+                    if (cmdline.isEmpty()) {
+                        // Fallback: take last part or reconstruct
+                        cmdline = parts.last()
+                        exeName = parts.last()
+                    }
+
+                    val rawName = exeName
 
                     // Exclude kernel threads (e.g. [kworker...], [rcu_preempt])
+                    if (cmdline.startsWith("[") && cmdline.endsWith("]")) continue
                     if (rawName.startsWith("[") && rawName.endsWith("]")) continue
 
                     val isAppUid = user.startsWith("u0_a") || user.startsWith("u0_i") || user.startsWith("u10_a") || user.startsWith("app_")
@@ -3094,7 +3916,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         installedApp != null -> installedApp.appName
                         basePackage.isNotEmpty() -> parseFriendlyAppName(basePackage)
                         isSystemDaemon -> parseFriendlyProcessName(rawName)
-                        else -> rawName
+                        else -> ""
                     }
 
                     val isSystemApp = when {
@@ -3118,7 +3940,9 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                             appTitle = appTitle,
                             packageName = basePackage,
                             isUserApp = isUserApp,
-                            isSystemApp = isSystemApp
+                            isSystemApp = isSystemApp,
+                            cmdline = cmdline,
+                            args = cmdArgs
                         )
                     )
                 }
@@ -3278,12 +4102,25 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     fun killProcess(proc: RemoteProcessItem) {
         val conn = activeConnection ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            if (proc.packageName.isNotEmpty()) {
-                conn.executeShell("am force-stop ${proc.packageName}")
+            val isRoot = proc.isRootUser
+            if (isRoot) {
+                Log.i("AdbViewModel", "正在使用 ROOT 权限杀死进程 PID: ${proc.pid} (${proc.name}) [运行用户: ${proc.user}]")
+                if (proc.packageName.isNotEmpty()) {
+                    conn.executeShell("su -c \"am force-stop ${proc.packageName}\" 2>/dev/null || am force-stop ${proc.packageName} 2>/dev/null")
+                }
+                val killCmd = "su -c \"kill -9 ${proc.pid}\" 2>&1 || su 0 kill -9 ${proc.pid} 2>&1 || kill -9 ${proc.pid} 2>&1"
+                val res = conn.executeShell(killCmd)
+                Log.i("AdbViewModel", "ROOT kill 执行结果: $res")
+                val displayName = proc.appTitle.ifEmpty { proc.name }
+                _actionMessage.value = "已使用 ROOT 权限结束进程: $displayName (PID: ${proc.pid})"
+            } else {
+                if (proc.packageName.isNotEmpty()) {
+                    conn.executeShell("am force-stop ${proc.packageName}")
+                }
+                conn.executeShell("kill -9 ${proc.pid}")
+                val msg = if (proc.appTitle.isNotEmpty()) "已终止应用: ${proc.appTitle}" else "已结束进程 PID: ${proc.pid}"
+                _actionMessage.value = msg
             }
-            conn.executeShell("kill -9 ${proc.pid}")
-            val msg = if (proc.appTitle.isNotEmpty()) "已终止应用: ${proc.appTitle}" else "已结束进程 PID: ${proc.pid}"
-            _actionMessage.value = msg
             refreshProcesses(force = true)
         }
     }

@@ -7,6 +7,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import javax.net.ssl.SSLSocket
 
 class AdbConnection(
     val ip: String,
@@ -64,10 +65,9 @@ class AdbConnection(
             s.sendBufferSize = 8 * 1024 * 1024    // 8MB send buffer for high throughput file transfer
             s.soTimeout = 10000
             this.socket = s
-            this.input = java.io.BufferedInputStream(s.getInputStream(), 524288)
-            this.output = java.io.BufferedOutputStream(s.getOutputStream(), 524288)
+            this.input = s.getInputStream()
+            this.output = s.getOutputStream()
         }
-
 
         val crypto = AdbCrypto.getOrCreate(context)
 
@@ -91,6 +91,27 @@ class AdbConnection(
             }
 
             when (response.command) {
+                AdbMessage.CMD_STLS -> {
+                    onStatusUpdate?.invoke("目标设备请求 TLS 安全连接，正在建立 TLS 1.3 握手...")
+                    // 1. Send STLS acknowledgement packet back to device
+                    val stlsMsg = AdbMessage(AdbMessage.CMD_STLS, AdbMessage.A_STLS_VERSION, 0)
+                    safeWriteMessage(stlsMsg)
+
+                    // 2. Upgrade socket to TLS 1.3
+                    val rawSocket = this.socket ?: throw Exception("Socket is closed")
+                    val sslContext = crypto.createSslContext()
+                    val sslSocket = sslContext.socketFactory.createSocket(rawSocket, ip, port, true) as SSLSocket
+                    sslSocket.enabledProtocols = arrayOf("TLSv1.3")
+                    sslSocket.useClientMode = true
+                    sslSocket.soTimeout = 15000
+                    sslSocket.startHandshake()
+
+                    // 3. Switch stream references to TLS socket
+                    this.socket = sslSocket
+                    this.input = sslSocket.inputStream
+                    this.output = sslSocket.outputStream
+                    onStatusUpdate?.invoke("TLS 1.3 握手成功，正在验证设备授权...")
+                }
                 AdbMessage.CMD_CNXN -> {
                     deviceBanner = String(response.payload, Charsets.UTF_8)
                     val devMaxData = response.arg1
@@ -135,7 +156,9 @@ class AdbConnection(
         }
 
         socket?.soTimeout = 0
-        // Reset soTimeout to 0 (infinite) for background reader loop
+        // Wrap streams in high throughput buffers for scrcpy, file transfers and sync
+        input?.let { this.input = java.io.BufferedInputStream(it, 524288) }
+        output?.let { this.output = java.io.BufferedOutputStream(it, 524288) }
 
 
         // Start background reader loop

@@ -58,6 +58,11 @@ class AdbSyncClient(private val connection: AdbConnection) {
                 val cleanName = if (isLink && name.contains(" -> ")) name.substringBefore(" -> ") else name
                 val fullPath = if (path.endsWith("/")) "$path$cleanName" else "$path/$cleanName"
 
+                // Parse timestamp from date & time parts (e.g. "2023-08-15 14:32" or "Aug 15 14:32" or "Aug 15 2023")
+                val datePart1 = parts[5]
+                val datePart2 = parts[6]
+                val lastModifiedTime = parseFileTimestamp(datePart1, datePart2)
+
                 items.add(
                     RemoteFileItem(
                         name = cleanName,
@@ -65,7 +70,7 @@ class AdbSyncClient(private val connection: AdbConnection) {
                         isDirectory = isDir,
                         size = size,
                         mode = 0,
-                        lastModified = System.currentTimeMillis()
+                        lastModified = lastModifiedTime
                     )
                 )
             } else if (parts.size in 4..7 && (parts[0].startsWith("-") || parts[0].startsWith("d") || parts[0].startsWith("l"))) {
@@ -88,6 +93,31 @@ class AdbSyncClient(private val connection: AdbConnection) {
             }
         }
         return items.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+    }
+
+    private fun parseFileTimestamp(part1: String, part2: String): Long {
+        return try {
+            if (part1.contains("-")) {
+                // Format: YYYY-MM-DD HH:MM
+                val dtStr = "$part1 $part2"
+                val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
+                sdf.timeZone = java.util.TimeZone.getDefault()
+                sdf.parse(dtStr)?.time ?: System.currentTimeMillis()
+            } else {
+                // Traditional format: "Aug 15 14:32" or "Aug 15 2023"
+                val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+                val dtStr = "$part1 $part2"
+                if (part2.contains(":")) {
+                    val sdf = java.text.SimpleDateFormat("MMM dd HH:mm yyyy", java.util.Locale.US)
+                    sdf.parse("$dtStr $currentYear")?.time ?: System.currentTimeMillis()
+                } else {
+                    val sdf = java.text.SimpleDateFormat("MMM dd yyyy", java.util.Locale.US)
+                    sdf.parse(dtStr)?.time ?: System.currentTimeMillis()
+                }
+            }
+        } catch (_: Exception) {
+            System.currentTimeMillis()
+        }
     }
 
     private fun isSystemOrRestrictedPath(path: String): Boolean {
@@ -359,6 +389,21 @@ class AdbSyncClient(private val connection: AdbConnection) {
             throw Exception("文件过大 (${String.format(java.util.Locale.US, "%.1f", bytes.size / (1024.0 * 1024.0))} MB)，暂不支持在线预览编辑，建议下载后查看")
         }
         return String(bytes, Charsets.UTF_8)
+    }
+
+    fun readBinaryFile(
+        remotePath: String,
+        maxBytes: Int = 25 * 1024 * 1024,
+        isCancelled: () -> Boolean = { false },
+        onProgress: (Long) -> Unit = {}
+    ): ByteArray {
+        val baos = java.io.ByteArrayOutputStream()
+        pullFile(remotePath, baos, isCancelled, onProgress)
+        val bytes = baos.toByteArray()
+        if (bytes.size > maxBytes) {
+            throw Exception("图片文件过大 (${String.format(java.util.Locale.US, "%.1f", bytes.size / (1024.0 * 1024.0))} MB)，超过在线查看限制 (25MB)")
+        }
+        return bytes
     }
 
     fun writeTextFile(remotePath: String, content: String) {

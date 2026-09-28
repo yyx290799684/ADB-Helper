@@ -19,6 +19,9 @@ data class AdbMessage(
         const val CMD_OKAY = 0x59414b4f
         const val CMD_CLSE = 0x45534c43
         const val CMD_WRTE = 0x45545257
+        const val CMD_STLS = 0x534c5453
+
+        const val A_STLS_VERSION = 0x01000000
 
         const val AUTH_TYPE_TOKEN = 1
         const val AUTH_TYPE_SIGNATURE = 2

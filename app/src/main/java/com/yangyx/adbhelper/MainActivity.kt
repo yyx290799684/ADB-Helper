@@ -7,6 +7,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -14,10 +17,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Phonelink
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.ui.unit.LayoutDirection
+import com.yangyx.adbhelper.ui.components.BottomBarSettingsSheet
+import com.yangyx.adbhelper.ui.components.LiquidGlassBottomBar
+import com.yangyx.adbhelper.ui.models.BottomBarMode
+import com.yangyx.adbhelper.ui.models.NavItem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -48,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import android.app.Activity
 import androidx.core.view.WindowInsetsCompat
@@ -59,15 +70,11 @@ import com.yangyx.adbhelper.ui.AdbViewModel
 import com.yangyx.adbhelper.ui.ConnectionState
 import com.yangyx.adbhelper.ui.screens.AppAndProcessScreen
 import com.yangyx.adbhelper.ui.screens.ConnectScreen
+import com.yangyx.adbhelper.ui.screens.DeviceScreen
 import com.yangyx.adbhelper.ui.screens.DeviceInfoScreen
 import com.yangyx.adbhelper.ui.screens.FileExplorerScreen
 import com.yangyx.adbhelper.ui.screens.TerminalScreen
 import com.yangyx.adbhelper.ui.theme.MyApplicationTheme
-
-data class NavItem(
-    val title: String,
-    val icon: ImageVector
-)
 
 class MainActivity : ComponentActivity() {
 
@@ -87,13 +94,17 @@ class MainActivity : ComponentActivity() {
 
                 val isConnected = connectionState is ConnectionState.Connected
 
+                val bottomBarMode by viewModel.bottomBarMode.collectAsState()
+                val liquidGlassConfig by viewModel.liquidGlassConfig.collectAsState()
+                var showBottomBarSettingsSheet by remember { mutableStateOf(false) }
+
                 var selectedNavIndex by remember { mutableIntStateOf(0) }
 
                 val navItems = listOf(
                     NavItem("屏幕", Icons.Default.AspectRatio),
                     NavItem("文件", Icons.Default.Folder),
                     NavItem("终端", Icons.Default.Terminal),
-                    NavItem("信息", Icons.Default.Analytics),
+                    NavItem("设备", Icons.Default.PhoneAndroid),
                     NavItem("应用/进程", Icons.Default.Apps)
                 )
 
@@ -101,6 +112,12 @@ class MainActivity : ComponentActivity() {
                     actionMsg?.let { msg ->
                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         viewModel.clearActionMessage()
+                    }
+                }
+
+                LaunchedEffect(isConnected) {
+                    if (!isConnected) {
+                        selectedNavIndex = 0
                     }
                 }
 
@@ -114,6 +131,15 @@ class MainActivity : ComponentActivity() {
                                         text = "ADB 远程助手",
                                         fontWeight = FontWeight.Bold
                                     )
+                                },
+                                actions = {
+                                    IconButton(onClick = { showBottomBarSettingsSheet = true }) {
+                                        Icon(
+                                            imageVector = Icons.Default.AutoAwesome,
+                                            contentDescription = "底栏风格与外观设置",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 },
                                 colors = TopAppBarDefaults.topAppBarColors(
                                     containerColor = MaterialTheme.colorScheme.surface
@@ -182,6 +208,13 @@ class MainActivity : ComponentActivity() {
                                         )
                                     },
                                     actions = {
+                                        IconButton(onClick = { showBottomBarSettingsSheet = true }) {
+                                            Icon(
+                                                imageVector = Icons.Default.AutoAwesome,
+                                                contentDescription = "底栏风格与外观设置",
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
                                         IconButton(onClick = { showDisconnectConfirmDialog = true }) {
                                             Icon(
                                                 Icons.Default.LinkOff,
@@ -198,13 +231,35 @@ class MainActivity : ComponentActivity() {
                         },
                         bottomBar = {
                             if (!showFullscreen) {
-                                NavigationBar {
-                                    navItems.forEachIndexed { index, item ->
-                                        NavigationBarItem(
-                                            selected = selectedNavIndex == index,
-                                            onClick = { selectedNavIndex = index },
-                                            icon = { Icon(item.icon, contentDescription = item.title) },
-                                            label = { Text(item.title) }
+                                when (bottomBarMode) {
+                                    BottomBarMode.CLASSIC_M3 -> {
+                                        NavigationBar {
+                                            navItems.forEachIndexed { index, item ->
+                                                NavigationBarItem(
+                                                    selected = selectedNavIndex == index,
+                                                    onClick = { selectedNavIndex = index },
+                                                    icon = { Icon(item.icon, contentDescription = item.title) },
+                                                    label = {
+                                                        Text(
+                                                            text = item.title,
+                                                            maxLines = 1,
+                                                            fontSize = 11.sp,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    },
+                                                    alwaysShowLabel = true
+                                                )
+                                            }
+                                        }
+                                    }
+                                    BottomBarMode.LIQUID_GLASS -> {
+                                        val isStreaming = selectedNavIndex == 0 && scrcpyState is ScreenState.Streaming
+                                        LiquidGlassBottomBar(
+                                            navItems = navItems,
+                                            selectedIndex = selectedNavIndex,
+                                            onItemSelected = { selectedNavIndex = it },
+                                            config = liquidGlassConfig,
+                                            isDocked = isStreaming
                                         )
                                     }
                                 }
@@ -213,18 +268,29 @@ class MainActivity : ComponentActivity() {
                         snackbarHost = { SnackbarHost(snackbarHostState) },
                         modifier = Modifier.fillMaxSize()
                     ) { innerPadding ->
+                        val isGlassMode = bottomBarMode == BottomBarMode.LIQUID_GLASS
+                        val isStreaming = selectedNavIndex == 0 && scrcpyState is ScreenState.Streaming
+
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(innerPadding)
                                 .consumeWindowInsets(innerPadding)
                         ) {
                             val controller = viewModel.scrcpyController
                             if (controller != null) {
                                 val installedApps by viewModel.installedApps.collectAsState()
+                                // When streaming (投屏进去以后), scrcpy video must NOT overlap with the navigation bar, so bottom = innerPadding.calculateBottomPadding().
+                                // When on the Idle/settings control page, scrcpy fills down to 0.dp in Glass Mode so the glass bar floats over the scrollable page.
+                                val scrcpyBottomPadding = if (isGlassMode && !isStreaming) 0.dp else innerPadding.calculateBottomPadding()
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
+                                        .padding(
+                                            top = innerPadding.calculateTopPadding(),
+                                            start = innerPadding.calculateStartPadding(LayoutDirection.Ltr),
+                                            end = innerPadding.calculateEndPadding(LayoutDirection.Ltr),
+                                            bottom = scrcpyBottomPadding
+                                        )
                                         .graphicsLayer {
                                             alpha = if (selectedNavIndex == 0) 1f else 0f
                                             translationX = if (selectedNavIndex == 0) 0f else 99999f
@@ -237,11 +303,37 @@ class MainActivity : ComponentActivity() {
                                     )
                                 }
                             }
+                            // In Glass Mode, content screens with scrolling lists (File Explorer, Device Info, Apps)
+                            // fill the screen to the bottom (bottom = 0.dp) so that the glass bottom bar floats over the list.
+                            // Their internal LazyColumns provide 100.dp contentPadding at the bottom so that the last item
+                            // scrolls cleanly above the floating bar with full safety distance.
+                            // Terminal has a pinned bottom input field, so it dynamically tracks the navigation bar height with compact spacing.
+                            val listScreenBottomPadding = if (isGlassMode) 0.dp else innerPadding.calculateBottomPadding()
+                            val terminalBottomPadding = if (isGlassMode) (innerPadding.calculateBottomPadding() - 6.dp).coerceAtLeast(0.dp) else innerPadding.calculateBottomPadding()
+
+                            val listScreenModifier = Modifier
+                                .fillMaxSize()
+                                .padding(
+                                    top = innerPadding.calculateTopPadding(),
+                                    start = innerPadding.calculateStartPadding(LayoutDirection.Ltr),
+                                    end = innerPadding.calculateEndPadding(LayoutDirection.Ltr),
+                                    bottom = listScreenBottomPadding
+                                )
+
+                            val terminalScreenModifier = Modifier
+                                .fillMaxSize()
+                                .padding(
+                                    top = innerPadding.calculateTopPadding(),
+                                    start = innerPadding.calculateStartPadding(LayoutDirection.Ltr),
+                                    end = innerPadding.calculateEndPadding(LayoutDirection.Ltr),
+                                    bottom = terminalBottomPadding
+                                )
+
                             when (selectedNavIndex) {
-                                1 -> FileExplorerScreen(viewModel = viewModel)
-                                2 -> TerminalScreen(viewModel = viewModel)
-                                3 -> DeviceInfoScreen(viewModel = viewModel)
-                                4 -> AppAndProcessScreen(viewModel = viewModel)
+                                1 -> FileExplorerScreen(viewModel = viewModel, modifier = listScreenModifier, isGlassMode = isGlassMode)
+                                2 -> TerminalScreen(viewModel = viewModel, modifier = terminalScreenModifier)
+                                3 -> DeviceScreen(viewModel = viewModel, modifier = listScreenModifier, isGlassMode = isGlassMode)
+                                4 -> AppAndProcessScreen(viewModel = viewModel, modifier = listScreenModifier, isGlassMode = isGlassMode)
                             }
 
                             // Global Floating Overlay for APK push and install progress
@@ -286,6 +378,14 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                }
+
+                if (showBottomBarSettingsSheet) {
+                    BottomBarSettingsSheet(
+                        currentMode = bottomBarMode,
+                        onModeChange = { viewModel.setBottomBarMode(it) },
+                        onDismissRequest = { showBottomBarSettingsSheet = false }
+                    )
                 }
             }
         }

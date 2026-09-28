@@ -89,7 +89,8 @@ import com.yangyx.adbhelper.adb.RemoteFileItem
 import com.yangyx.adbhelper.ui.AdbViewModel
 import kotlinx.coroutines.launch
 
-fun isTextFile(fileName: String, fileSize: Long = 0L): Boolean {
+fun isTextFile(fileName: String, fileSize: Long = 0L, isDirectory: Boolean = false): Boolean {
+    if (isDirectory) return false
     val lower = fileName.lowercase()
     val ext = lower.substringAfterLast('.', "")
     val textExtensions = setOf(
@@ -103,7 +104,7 @@ fun isTextFile(fileName: String, fileSize: Long = 0L): Boolean {
         "license", "readme", "notice", "authors", "manifest", "version"
     )
     if (lower in textNames) return true
-    // If size is under 512KB and has no extension, assume it can be opened as text
+    // If size is under 512KB and has no extension, assume it can be opened as text (only for non-directory files)
     return ext.isEmpty() && fileSize in 1..524_288
 }
 

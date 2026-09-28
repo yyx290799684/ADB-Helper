@@ -1,6 +1,12 @@
 package com.yangyx.adbhelper.ui.screens
 
 import android.view.KeyEvent as AndroidKeyEvent
+import androidx.collection.LruCache
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -10,8 +16,10 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,9 +28,12 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -74,6 +85,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -224,6 +236,58 @@ fun TerminalScreen(
     val isSystemDark = isSystemInDarkTheme()
     val terminalColors = if (isSystemDark) OneHalfDark else OneHalfLight
 
+    val lazyListState = rememberLazyListState()
+    var userScrolledUp by remember { mutableStateOf(false) }
+
+    val chunks = remember(outputText) {
+        val allLines = outputText.split("\n")
+        val result = ArrayList<TerminalChunk>(allLines.size / 25 + 2)
+        var chunkIndex = 0
+        var lineOffset = 0
+        val chunkSize = 30
+
+        while (lineOffset < allLines.size) {
+            val end = (lineOffset + chunkSize).coerceAtMost(allLines.size)
+            val chunkLines = allLines.subList(lineOffset, end)
+            result.add(
+                TerminalChunk(
+                    id = chunkIndex,
+                    startIndex = lineOffset,
+                    lines = chunkLines,
+                    rawText = chunkLines.joinToString("\n")
+                )
+            )
+            chunkIndex++
+            lineOffset = end
+        }
+        if (result.isEmpty()) {
+            result.add(TerminalChunk(0, 0, listOf(""), ""))
+        }
+        result
+    }
+
+    val isAtBottom by remember {
+        derivedStateOf {
+            val layoutInfo = lazyListState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            if (totalItems == 0) return@derivedStateOf true
+            val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            lastVisibleItem >= totalItems - 2
+        }
+    }
+
+    LaunchedEffect(lazyListState.isScrollInProgress) {
+        if (lazyListState.isScrollInProgress) {
+            userScrolledUp = !isAtBottom
+        }
+    }
+
+    LaunchedEffect(chunks.size, chunks.lastOrNull()?.rawText?.length) {
+        if (!userScrolledUp && chunks.isNotEmpty()) {
+            lazyListState.scrollToItem(chunks.size - 1)
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -246,67 +310,125 @@ fun TerminalScreen(
                     }
                 }
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                val scrollModifier = if (!isWrapMode) {
-                    Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 6.dp, vertical = 6.dp)
-                        .verticalScroll(scrollState)
-                        .horizontalScroll(horizontalScrollState)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .drawWithContent {
+                        drawContent()
+                        val layoutInfo = lazyListState.layoutInfo
+                        val totalItems = layoutInfo.totalItemsCount
+                        val visibleItems = layoutInfo.visibleItemsInfo
+                        if (totalItems > 0 && visibleItems.isNotEmpty()) {
+                            val firstItem = visibleItems.first().index
+                            val visibleCount = visibleItems.size
+                            val viewportHeight = size.height
+                            val thumbHeightRatio = (visibleCount.toFloat() / totalItems).coerceIn(0.06f, 1f)
+                            val thumbHeight = (viewportHeight * thumbHeightRatio).coerceAtLeast(36f)
+                            val maxScrollableItems = (totalItems - visibleCount).coerceAtLeast(1)
+                            val scrollProgress = (firstItem.toFloat() / maxScrollableItems).coerceIn(0f, 1f)
+                            val thumbOffsetY = scrollProgress * (viewportHeight - thumbHeight)
+
+                            drawRoundRect(
+                                color = if (terminalColors.isDark) Color(0xAA5C6370) else Color(0x66A0A1A7),
+                                topLeft = Offset(size.width - 3.dp.toPx(), thumbOffsetY),
+                                size = Size(3.dp.toPx(), thumbHeight),
+                                cornerRadius = CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
+                            )
+                        }
+                        if (!isWrapMode && horizontalScrollState.maxValue > 0) {
+                            val totalWidth = size.width
+                            val totalHorizScrollable = horizontalScrollState.maxValue.toFloat()
+                            val visibleRatio = totalWidth / (totalWidth + totalHorizScrollable)
+                            val barWidth = (totalWidth * visibleRatio).coerceAtLeast(36f)
+                            val scrollOffsetRatio = horizontalScrollState.value.toFloat() / totalHorizScrollable
+                            val barOffsetX = scrollOffsetRatio * (totalWidth - barWidth)
+
+                            drawRoundRect(
+                                color = if (terminalColors.isDark) Color(0xAA5C6370) else Color(0x66A0A1A7),
+                                topLeft = Offset(barOffsetX, size.height - 3.dp.toPx()),
+                                size = Size(barWidth, 3.dp.toPx()),
+                                cornerRadius = CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
+                            )
+                        }
+                    }
+            ) {
+                val horizontalModifier = if (!isWrapMode) {
+                    Modifier.horizontalScroll(horizontalScrollState)
                 } else {
                     Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 6.dp, vertical = 6.dp)
-                        .verticalScroll(scrollState)
                 }
 
-                Column(
-                    modifier = scrollModifier
-                        .drawWithContent {
-                            drawContent()
-                            val totalHeight = size.height
-                            val totalScrollable = scrollState.maxValue.toFloat()
-                            if (totalScrollable > 0) {
-                                val visibleRatio = totalHeight / (totalHeight + totalScrollable)
-                                val barHeight = (totalHeight * visibleRatio).coerceAtLeast(36f)
-                                val scrollOffsetRatio = scrollState.value.toFloat() / totalScrollable
-                                val barOffsetY = scrollOffsetRatio * (totalHeight - barHeight)
-
-                                drawRoundRect(
-                                    color = if (terminalColors.isDark) Color(0xAA5C6370) else Color(0x66A0A1A7),
-                                    topLeft = Offset(size.width - 3.dp.toPx(), barOffsetY),
-                                    size = Size(3.dp.toPx(), barHeight),
-                                    cornerRadius = CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
-                                )
-                            }
-                            if (!isWrapMode && horizontalScrollState.maxValue > 0) {
-                                val totalWidth = size.width
-                                val totalHorizScrollable = horizontalScrollState.maxValue.toFloat()
-                                val visibleRatio = totalWidth / (totalWidth + totalHorizScrollable)
-                                val barWidth = (totalWidth * visibleRatio).coerceAtLeast(36f)
-                                val scrollOffsetRatio = horizontalScrollState.value.toFloat() / totalHorizScrollable
-                                val barOffsetX = scrollOffsetRatio * (totalWidth - barWidth)
-
-                                drawRoundRect(
-                                    color = if (terminalColors.isDark) Color(0xAA5C6370) else Color(0x66A0A1A7),
-                                    topLeft = Offset(barOffsetX, size.height - 3.dp.toPx()),
-                                    size = Size(barWidth, 3.dp.toPx()),
-                                    cornerRadius = CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(horizontalModifier)
+                ) {
+                    SelectionContainer {
+                        LazyColumn(
+                            state = lazyListState,
+                            modifier = if (!isWrapMode) {
+                                Modifier
+                                    .fillMaxHeight()
+                                    .widthIn(min = 1600.dp)
+                            } else {
+                                Modifier.fillMaxSize()
+                            },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                        ) {
+                            items(
+                                count = chunks.size,
+                                key = { chunks[it].id }
+                            ) { index ->
+                                TerminalChunkItem(
+                                    chunk = chunks[index],
+                                    theme = terminalColors,
+                                    fontSizeSp = fontSizeSp,
+                                    isWrapMode = isWrapMode
                                 )
                             }
                         }
-                ) {
-                    val annotatedOutput = remember(outputText, terminalColors) {
-                        buildTerminalAnnotatedString(outputText, terminalColors)
                     }
-                    SelectionContainer {
-                        Text(
-                            text = annotatedOutput,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = fontSizeSp.sp,
-                            lineHeight = (fontSizeSp * 1.35f).sp,
-                            softWrap = isWrapMode
-                        )
+                }
+
+                // Floating scroll to bottom chip
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = userScrolledUp && !isAtBottom,
+                    enter = fadeIn() + slideInVertically { it / 2 },
+                    exit = fadeOut() + slideOutVertically { it / 2 },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(bottom = 12.dp, end = 12.dp)
+                ) {
+                    Surface(
+                        onClick = {
+                            userScrolledUp = false
+                            coroutineScope.launch {
+                                lazyListState.animateScrollToItem((chunks.size - 1).coerceAtLeast(0))
+                            }
+                        },
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shadowElevation = 6.dp,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowDownward,
+                                contentDescription = "回到底部",
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "回到底部",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
                     }
                 }
 
@@ -367,7 +489,10 @@ fun TerminalScreen(
                         )
                     }
                     IconButton(
-                        onClick = { viewModel.clearTerminal() },
+                        onClick = {
+                            TerminalHighlightCache.clear()
+                            viewModel.clearTerminal()
+                        },
                         modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
@@ -1153,6 +1278,82 @@ private object TerminalRegexPatterns {
 }
 
 /**
+ * Data model for chunked virtualized rendering of terminal lines.
+ */
+private data class TerminalChunk(
+    val id: Int,
+    val startIndex: Int,
+    val lines: List<String>,
+    val rawText: String
+)
+
+/**
+ * LRU Cache for high-speed terminal highlighting to prevent CPU freezes on large logs.
+ */
+private object TerminalHighlightCache {
+    private val cache = LruCache<String, AnnotatedString>(400)
+
+    fun getOrCompute(key: String, compute: () -> AnnotatedString): AnnotatedString {
+        val existing = cache.get(key)
+        if (existing != null) return existing
+        val computed = compute()
+        cache.put(key, computed)
+        return computed
+    }
+
+    fun clear() {
+        cache.evictAll()
+    }
+}
+
+@Composable
+private fun TerminalChunkItem(
+    chunk: TerminalChunk,
+    theme: TerminalPalette,
+    fontSizeSp: Float,
+    isWrapMode: Boolean
+) {
+    val cacheKey = "${theme.isDark}_${chunk.id}_${chunk.rawText.hashCode()}_${chunk.rawText.length}"
+    val annotatedText = remember(cacheKey) {
+        TerminalHighlightCache.getOrCompute(cacheKey) {
+            buildChunkAnnotatedString(chunk.lines, theme)
+        }
+    }
+
+    Text(
+        text = annotatedText,
+        fontFamily = FontFamily.Monospace,
+        fontSize = fontSizeSp.sp,
+        lineHeight = (fontSizeSp * 1.35f).sp,
+        softWrap = isWrapMode,
+        modifier = if (!isWrapMode) {
+            Modifier.wrapContentWidth(Alignment.Start)
+        } else {
+            Modifier.fillMaxWidth()
+        }
+    )
+}
+
+/**
+ * Builds annotated string for a specific chunk of terminal lines.
+ */
+private fun buildChunkAnnotatedString(lines: List<String>, theme: TerminalPalette): AnnotatedString {
+    return buildAnnotatedString {
+        lines.forEachIndexed { index, line ->
+            if (TerminalRegexPatterns.AnsiEscape.containsMatchIn(line)) {
+                renderAnsiLine(this, line, theme)
+            } else {
+                renderHighlightedLine(this, line, theme)
+            }
+
+            if (index < lines.size - 1) {
+                append("\n")
+            }
+        }
+    }
+}
+
+/**
  * Builds annotated string for terminal output using One Half syntax highlighting and ANSI code support.
  */
 private fun buildTerminalAnnotatedString(text: String, theme: TerminalPalette): AnnotatedString {
@@ -1244,66 +1445,84 @@ private fun renderAnsiLine(builder: AnnotatedString.Builder, line: String, theme
  * Line & Token-level syntax highlighting based on One Half theme grammar.
  */
 private fun renderHighlightedLine(builder: AnnotatedString.Builder, line: String, theme: TerminalPalette) {
+    if (line.isEmpty()) return
     val trimmed = line.trimStart()
-
-    // 1. Full Shell Prompt (e.g. root@android:/sdcard # ls -la)
-    val promptMatch = TerminalRegexPatterns.PromptFull.find(trimmed)
-    if (promptMatch != null) {
-        val leadingWs = line.substring(0, line.length - trimmed.length)
-        builder.append(leadingWs)
-
-        val exitCode = promptMatch.groupValues[1]
-        val userHost = promptMatch.groupValues[2]
-        val path = promptMatch.groupValues[3]
-        val symbol = promptMatch.groupValues[4]
-        val command = promptMatch.groupValues[5]
-
-        if (exitCode.isNotEmpty()) {
-            builder.withStyle(SpanStyle(color = theme.red, fontWeight = FontWeight.Bold)) {
-                append(exitCode)
-            }
-        }
-
-        val isRoot = userHost.startsWith("root")
-        val userColor = if (isRoot) theme.red else theme.green
-        builder.withStyle(SpanStyle(color = userColor, fontWeight = FontWeight.Bold)) {
-            append(userHost)
-        }
-
-        builder.withStyle(SpanStyle(color = theme.comment)) {
-            append(":")
-        }
-
-        builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.SemiBold)) {
-            append(path)
-        }
-
-        val symbolColor = if (symbol == "#") theme.red else theme.yellow
-        builder.withStyle(SpanStyle(color = symbolColor, fontWeight = FontWeight.Bold)) {
-            append(symbol)
-            append(" ")
-        }
-
-        renderCommandLineTokens(builder, command, theme)
+    if (trimmed.isEmpty()) {
+        builder.append(line)
         return
     }
 
-    // 2. Simple prompt ($ cmd or # cmd)
-    val simplePromptMatch = TerminalRegexPatterns.PromptSimple.find(trimmed)
-    if (simplePromptMatch != null) {
-        val leadingWs = line.substring(0, line.length - trimmed.length)
-        builder.append(leadingWs)
-
-        val symbol = simplePromptMatch.groupValues[1]
-        val cmd = simplePromptMatch.groupValues[2]
-        val symbolColor = if (symbol == "#") theme.red else theme.yellow
-
-        builder.withStyle(SpanStyle(color = symbolColor, fontWeight = FontWeight.Bold)) {
-            append(symbol)
-            append(" ")
+    // Protection against anomalous super-long single lines (e.g. dumpsys / base64 dump)
+    if (line.length > 1000) {
+        val head = line.substring(0, 1000)
+        val tail = line.substring(1000)
+        renderHighlightedLine(builder, head, theme)
+        builder.withStyle(SpanStyle(color = theme.foreground)) {
+            append(tail)
         }
-        renderCommandLineTokens(builder, cmd, theme)
         return
+    }
+
+    // 1. Full Shell Prompt (e.g. root@android:/sdcard # ls -la)
+    if (trimmed.contains('@') || trimmed.contains('#') || trimmed.contains('$')) {
+        val promptMatch = TerminalRegexPatterns.PromptFull.find(trimmed)
+        if (promptMatch != null) {
+            val leadingWs = line.substring(0, line.length - trimmed.length)
+            builder.append(leadingWs)
+
+            val exitCode = promptMatch.groupValues[1]
+            val userHost = promptMatch.groupValues[2]
+            val path = promptMatch.groupValues[3]
+            val symbol = promptMatch.groupValues[4]
+            val command = promptMatch.groupValues[5]
+
+            if (exitCode.isNotEmpty()) {
+                builder.withStyle(SpanStyle(color = theme.red, fontWeight = FontWeight.Bold)) {
+                    append(exitCode)
+                }
+            }
+
+            val isRoot = userHost.startsWith("root")
+            val userColor = if (isRoot) theme.red else theme.green
+            builder.withStyle(SpanStyle(color = userColor, fontWeight = FontWeight.Bold)) {
+                append(userHost)
+            }
+
+            builder.withStyle(SpanStyle(color = theme.comment)) {
+                append(":")
+            }
+
+            builder.withStyle(SpanStyle(color = theme.blue, fontWeight = FontWeight.SemiBold)) {
+                append(path)
+            }
+
+            val symbolColor = if (symbol == "#") theme.red else theme.yellow
+            builder.withStyle(SpanStyle(color = symbolColor, fontWeight = FontWeight.Bold)) {
+                append(symbol)
+                append(" ")
+            }
+
+            renderCommandLineTokens(builder, command, theme)
+            return
+        }
+
+        // 2. Simple prompt ($ cmd or # cmd)
+        val simplePromptMatch = TerminalRegexPatterns.PromptSimple.find(trimmed)
+        if (simplePromptMatch != null) {
+            val leadingWs = line.substring(0, line.length - trimmed.length)
+            builder.append(leadingWs)
+
+            val symbol = simplePromptMatch.groupValues[1]
+            val cmd = simplePromptMatch.groupValues[2]
+            val symbolColor = if (symbol == "#") theme.red else theme.yellow
+
+            builder.withStyle(SpanStyle(color = symbolColor, fontWeight = FontWeight.Bold)) {
+                append(symbol)
+                append(" ")
+            }
+            renderCommandLineTokens(builder, cmd, theme)
+            return
+        }
     }
 
     // 3. Logcat Format A: Timestamp PID TID Level Tag: Message
@@ -1575,6 +1794,28 @@ private fun renderCommandLineTokens(builder: AnnotatedString.Builder, commandTex
  * Parses arbitrary text and applies token-level One Half syntax highlighting.
  */
 private fun renderGenericTokens(
+    builder: AnnotatedString.Builder,
+    text: String,
+    theme: TerminalPalette,
+    defaultColor: Color? = null
+) {
+    if (text.isEmpty()) return
+
+    // For extremely long unparsed lines, highlight prefix and append remainder directly
+    if (text.length > 800) {
+        val head = text.substring(0, 800)
+        val tail = text.substring(800)
+        renderTokenMatches(builder, head, theme, defaultColor)
+        builder.withStyle(SpanStyle(color = defaultColor ?: theme.foreground)) {
+            append(tail)
+        }
+        return
+    }
+
+    renderTokenMatches(builder, text, theme, defaultColor)
+}
+
+private fun renderTokenMatches(
     builder: AnnotatedString.Builder,
     text: String,
     theme: TerminalPalette,

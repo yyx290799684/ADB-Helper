@@ -22,11 +22,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.BugReport
@@ -45,6 +47,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -118,10 +121,11 @@ private sealed class ConfirmAction {
 @Composable
 fun AppAndProcessScreen(
     viewModel: AdbViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isGlassMode: Boolean = false
 ) {
     val context = LocalContext.current
-    var selectedTabIndex by remember { mutableIntStateOf(0) }
+    val selectedTabIndex by viewModel.appProcessSelectedTabIndex.collectAsState()
     val tabs = listOf("应用管理 (APK/APKS)", "进程管理 (Processes)")
 
     val apps by viewModel.installedApps.collectAsState()
@@ -133,14 +137,15 @@ fun AppAndProcessScreen(
     val localApps by viewModel.localInstalledApps.collectAsState()
     val isLocalAppsLoading by viewModel.isLocalAppsLoading.collectAsState()
 
-    var searchQuery by remember { mutableStateOf("") }
-    var showSystemApps by remember { mutableStateOf(false) }
-
-    var processFilterMode by remember { mutableIntStateOf(0) } // 0: 仅第三方应用, 1: 包含系统应用, 2: 全部进程
+    val searchQuery by viewModel.appSearchQuery.collectAsState()
+    val showSystemApps by viewModel.appShowSystemApps.collectAsState()
+    val processFilterMode by viewModel.processFilterMode.collectAsState()
     var pendingConfirmAction by remember { mutableStateOf<ConfirmAction?>(null) }
+    var pendingRootTripleConfirmProc by remember { mutableStateOf<RemoteProcessItem?>(null) }
     var showDiagnosisDialog by remember { mutableStateOf(false) }
     var showInstallChoiceSheet by remember { mutableStateOf(false) }
     var showLocalAppsDialog by remember { mutableStateOf(false) }
+    var showLocalAppAnalysisScreen by remember { mutableStateOf(false) }
     var appToExport by remember { mutableStateOf<RemoteAppItem?>(null) }
 
     // App APK Export Launcher (CreateDocument)
@@ -189,7 +194,7 @@ fun AppAndProcessScreen(
                 tabs.forEachIndexed { index, title ->
                     Tab(
                         selected = selectedTabIndex == index,
-                        onClick = { selectedTabIndex = index },
+                        onClick = { viewModel.setAppProcessSelectedTabIndex(index) },
                         text = { Text(title, fontWeight = FontWeight.Bold) }
                     )
                 }
@@ -204,7 +209,7 @@ fun AppAndProcessScreen(
             ) {
                 OutlinedTextField(
                     value = searchQuery,
-                    onValueChange = { searchQuery = it },
+                    onValueChange = { viewModel.setAppSearchQuery(it) },
                     placeholder = { Text(if (selectedTabIndex == 0) "搜索应用包名或名称..." else "搜索应用名称/包名/PID...") },
                     leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search") },
                     singleLine = true,
@@ -286,25 +291,54 @@ fun AppAndProcessScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "共 ${filteredApps.size} 个应用",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    FilterChip(
-                        selected = showSystemApps,
-                        onClick = { showSystemApps = !showSystemApps },
-                        label = { Text("显示系统应用") },
-                        leadingIcon = if (showSystemApps) {
-                            { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                        } else null
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "共 ${filteredApps.size} 个应用",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FilterChip(
+                            selected = showSystemApps,
+                            onClick = { viewModel.setAppShowSystemApps(!showSystemApps) },
+                            label = { Text("显示系统应用") },
+                            leadingIcon = if (showSystemApps) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                            } else null
+                        )
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            showLocalAppAnalysisScreen = true
+                            viewModel.runLocalAppAnalysis(context, force = false)
+                        },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Analytics,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "远端应用分析",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
 
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                    val appsListState by viewModel.appsListState.collectAsState()
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        state = appsListState,
+                        contentPadding = PaddingValues(bottom = if (isGlassMode) 100.dp else 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                     items(
                         items = filteredApps,
                         key = { "app_${it.packageName}" },
@@ -332,8 +366,11 @@ fun AppAndProcessScreen(
                         processes.filter { proc ->
                             val matchesSearch = if (searchQuery.isBlank()) true else {
                                 proc.name.contains(searchQuery, ignoreCase = true) ||
+                                        proc.cmdline.contains(searchQuery, ignoreCase = true) ||
+                                        proc.fullCommandLine.contains(searchQuery, ignoreCase = true) ||
                                         proc.appTitle.contains(searchQuery, ignoreCase = true) ||
                                         proc.packageName.contains(searchQuery, ignoreCase = true) ||
+                                        proc.user.contains(searchQuery, ignoreCase = true) ||
                                         proc.pid.toString().contains(searchQuery)
                             }
                             val matchesFilter = when (processFilterMode) {
@@ -356,7 +393,7 @@ fun AppAndProcessScreen(
                     ) {
                         FilterChip(
                             selected = processFilterMode == 0,
-                            onClick = { processFilterMode = 0 },
+                            onClick = { viewModel.setProcessFilterMode(0) },
                             label = { Text("运行中应用", fontSize = 12.sp) },
                             leadingIcon = if (processFilterMode == 0) {
                                 { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
@@ -364,7 +401,7 @@ fun AppAndProcessScreen(
                         )
                         FilterChip(
                             selected = processFilterMode == 1,
-                            onClick = { processFilterMode = 1 },
+                            onClick = { viewModel.setProcessFilterMode(1) },
                             label = { Text("包含系统应用", fontSize = 12.sp) },
                             leadingIcon = if (processFilterMode == 1) {
                                 { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
@@ -372,7 +409,7 @@ fun AppAndProcessScreen(
                         )
                         FilterChip(
                             selected = processFilterMode == 2,
-                            onClick = { processFilterMode = 2 },
+                            onClick = { viewModel.setProcessFilterMode(2) },
                             label = { Text("全部进程", fontSize = 12.sp) },
                             leadingIcon = if (processFilterMode == 2) {
                                 { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp)) }
@@ -401,8 +438,11 @@ fun AppAndProcessScreen(
                         )
                     }
                 } else {
+                    val processListState by viewModel.processListState.collectAsState()
                     LazyColumn(
                         modifier = Modifier.weight(1f),
+                        state = processListState,
+                        contentPadding = PaddingValues(bottom = if (isGlassMode) 100.dp else 24.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(
@@ -427,7 +467,7 @@ fun AppAndProcessScreen(
                 containerColor = MaterialTheme.colorScheme.primary,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(24.dp)
+                    .padding(end = 24.dp, bottom = if (isGlassMode) 96.dp else 24.dp)
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 16.dp),
@@ -567,6 +607,54 @@ fun AppAndProcessScreen(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Card(
+                        onClick = {
+                            showInstallChoiceSheet = false
+                            showLocalAppAnalysisScreen = true
+                            viewModel.runLocalAppAnalysis(context, force = false)
+                        },
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondary,
+                                shape = CircleShape,
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        Icons.Default.Analytics,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSecondary
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "远端第三方应用分析报告",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp
+                                )
+                                Text(
+                                    text = "全面深度分析被控端手机 Target API、Min API 兼容性、64位架构及敏感权限画像",
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(24.dp))
                 }
             }
@@ -584,6 +672,19 @@ fun AppAndProcessScreen(
                 },
                 onDismiss = { showLocalAppsDialog = false }
             )
+        }
+
+        // Local App In-Depth Analysis Full Screen Dialog
+        if (showLocalAppAnalysisScreen) {
+            androidx.compose.ui.window.Dialog(
+                onDismissRequest = { showLocalAppAnalysisScreen = false },
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                LocalAppAnalysisScreen(
+                    viewModel = viewModel,
+                    onDismiss = { showLocalAppAnalysisScreen = false }
+                )
+            }
         }
 
         // Confirmation Dialog
@@ -613,15 +714,33 @@ fun AppAndProcessScreen(
                     onConfirm = { viewModel.uninstallApp(action.app.packageName) }
                 }
                 is ConfirmAction.KillProcess -> {
-                    val displayName = action.proc.appTitle.ifEmpty { action.proc.name }
-                    title = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) "确认停止运行中应用" else "确认结束系统进程"
-                    text = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) {
-                        "确定要强行停止并杀死应用「$displayName」(${action.proc.packageName.ifEmpty { action.proc.name }}) 吗？\n\n该操作将终止被控端该应用的所有前后台活动与服务。"
-                    } else {
-                        "确定要结束底层系统进程「${action.proc.name}」(PID: ${action.proc.pid}) 吗？"
+                    val displayName = when {
+                        action.proc.appTitle.isNotBlank() -> action.proc.appTitle
+                        action.proc.fullCommandLine.isNotBlank() -> action.proc.fullCommandLine
+                        else -> action.proc.name
                     }
-                    confirmLabel = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) "停止应用" else "结束进程"
-                    onConfirm = { viewModel.killProcess(action.proc) }
+                    if (action.proc.isRootUser) {
+                        title = "二次确认：终止 ROOT 特权进程警告"
+                        text = "⚠️ 检测到该进程以【ROOT (超级用户)】权限运行：\n\n" +
+                                "• 进程指令: $displayName\n" +
+                                "• 进程 PID: ${action.proc.pid}\n" +
+                                "• 运行用户: ${action.proc.user} (UID: 0)\n\n" +
+                                "该进程属于系统底层核心特权进程。随意杀死 ROOT 进程极易引起系统冻结、图形界面软重启 (Soft Reboot) 或整机异常崩溃！\n\n" +
+                                "由于此操作极度危险，系统将开启「三次确认」安全流程。是否继续？"
+                        confirmLabel = "下一步：进入三次确认"
+                        onConfirm = {
+                            pendingRootTripleConfirmProc = action.proc
+                        }
+                    } else {
+                        title = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) "确认停止运行中应用" else "确认结束系统进程"
+                        text = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) {
+                            "确定要强行停止并杀死应用「$displayName」(${action.proc.packageName.ifEmpty { action.proc.name }}) 吗？\n\n该操作将终止被控端该应用的所有前后台活动与服务。"
+                        } else {
+                            "确定要结束底层系统进程「$displayName」(PID: ${action.proc.pid}) 吗？"
+                        }
+                        confirmLabel = if (action.proc.isUserApp || action.proc.packageName.isNotEmpty()) "停止应用" else "结束进程"
+                        onConfirm = { viewModel.killProcess(action.proc) }
+                    }
                 }
             }
 
@@ -642,6 +761,105 @@ fun AppAndProcessScreen(
                 dismissButton = {
                     TextButton(onClick = { pendingConfirmAction = null }) {
                         Text("取消")
+                    }
+                }
+            )
+        }
+
+        // Root Process Triple Confirmation Dialog (三次确认高危终极授权)
+        pendingRootTripleConfirmProc?.let { proc ->
+            val displayName = when {
+                proc.appTitle.isNotBlank() -> proc.appTitle
+                proc.fullCommandLine.isNotBlank() -> proc.fullCommandLine
+                else -> proc.name
+            }
+            AlertDialog(
+                onDismissRequest = { pendingRootTripleConfirmProc = null },
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(36.dp)
+                    )
+                },
+                title = {
+                    Text(
+                        text = "三次确认：高危 ROOT 进程终止授权",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = "终极危险警告：这是终止特权进程的最后一道确认！",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "• 目标进程: $displayName",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "• 进程 PID: ${proc.pid}",
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "• 运行用户: ${proc.user} (UID: 0 / ROOT)",
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Text(
+                                    text = "• 终止指令: su -c kill -9 ${proc.pid}",
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Text(
+                            text = "⚠️ 强行杀死 ROOT 权限进程可能导致被控端系统立即发生软重启、图形界面黑屏或核心功能失效。您确定要立即使用 ROOT 权限强制杀死该进程吗？",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 16.sp
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            viewModel.killProcess(proc)
+                            pendingRootTripleConfirmProc = null
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        )
+                    ) {
+                        Text("强制使用 ROOT 杀死", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(
+                        onClick = { pendingRootTripleConfirmProc = null }
+                    ) {
+                        Text("取消操作 (推荐)")
                     }
                 }
             )
@@ -1260,8 +1478,13 @@ fun ProcessItemCard(
     proc: RemoteProcessItem,
     onKill: () -> Unit
 ) {
-    val displayName = proc.appTitle.ifEmpty { proc.name }
+    // For app processes, show user friendly app name if available; for binaries/scripts, show executable/full command
     val isApp = proc.isUserApp || proc.packageName.isNotEmpty()
+    val displayName = when {
+        proc.appTitle.isNotBlank() -> proc.appTitle
+        proc.fullCommandLine.isNotBlank() -> proc.fullCommandLine
+        else -> proc.name
+    }
 
     Card(
         shape = RoundedCornerShape(14.dp),
@@ -1270,185 +1493,254 @@ fun ProcessItemCard(
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.Top
+                .padding(horizontal = 12.dp, vertical = 10.dp)
         ) {
-            // Icon
-            Surface(
-                color = if (proc.isUserApp) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-                shape = CircleShape,
-                modifier = Modifier
-                    .padding(top = 2.dp)
-                    .size(40.dp)
+            // Top Row: Icon + Title & Identifier Column + Action Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(contentAlignment = Alignment.Center) {
+                // Icon
+                Surface(
+                    color = if (proc.isUserApp) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    },
+                    shape = CircleShape,
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = if (isApp) Icons.Default.Android else Icons.Default.Memory,
+                            contentDescription = null,
+                            tint = if (proc.isUserApp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                // Title & Subtitle Info Column
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    // Row 1: App Title & Type Tag
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = displayName,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        if (proc.isRootUser) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "ROOT",
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        } else if (proc.isUserApp) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "用户应用",
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        } else if (proc.isSystemApp) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "系统应用",
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Row 2: Secondary detail line:
+                    // For apps: package name (+ command/proc name if different)
+                    // For shell/binaries: if displayName is fullCommandLine, show executable binary / package; otherwise show full commandline
+                    val subtitleText = when {
+                        proc.packageName.isNotEmpty() && proc.packageName != displayName -> {
+                            if (proc.name.isNotEmpty() && proc.name != displayName && proc.name != proc.packageName) {
+                                "${proc.packageName} (${proc.name})"
+                            } else {
+                                proc.packageName
+                            }
+                        }
+                        proc.fullCommandLine.isNotEmpty() && proc.fullCommandLine != displayName -> {
+                            proc.fullCommandLine
+                        }
+                        proc.name.isNotEmpty() && proc.name != displayName -> {
+                            proc.name
+                        }
+                        else -> ""
+                    }
+
+                    if (subtitleText.isNotEmpty()) {
+                        Text(
+                            text = subtitleText,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                // Action Button: Right aligned
+                OutlinedButton(
+                    onClick = onKill,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    border = BorderStroke(
+                        if (proc.isRootUser) 1.5.dp else 1.dp,
+                        if (proc.isRootUser) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                    ),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(30.dp)
+                ) {
                     Icon(
-                        imageVector = if (isApp) Icons.Default.Android else Icons.Default.Memory,
+                        Icons.Default.Stop,
                         contentDescription = null,
-                        tint = if (proc.isUserApp) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = if (proc.isRootUser) "ROOT终止" else if (isApp) "停止" else "结束",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 1
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.width(10.dp))
+            // Spacing between Header and Metrics Bar
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Main Info Column
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+            // Bottom Row: Metrics Bar (PID, User, Memory, CPU)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 48.dp)
+                    .horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Row 1: App Title & Type Tag
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                // PID Badge
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(4.dp)
                 ) {
                     Text(
-                        text = displayName,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    if (proc.isUserApp) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "用户应用",
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
-                    } else if (proc.isSystemApp) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "系统应用",
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Row 2: Package Name & Process Name (Dedicated line, never crowded)
-                val showPkg = proc.packageName.isNotEmpty() && proc.packageName != displayName
-                val showProcName = proc.name.isNotEmpty() && proc.name != displayName && proc.name != proc.packageName
-                if (showPkg || showProcName) {
-                    val detailText = when {
-                        showPkg && showProcName -> "${proc.packageName} (${proc.name})"
-                        showPkg -> proc.packageName
-                        else -> proc.name
-                    }
-                    Text(
-                        text = detailText,
-                        fontSize = 11.sp,
+                        text = "PID: ${proc.pid}",
+                        fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                     )
                 }
 
-                // Row 3: Metrics Badges (PID, Memory, CPU)
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.padding(top = 2.dp)
-                ) {
-                    // PID Badge
+                // User Badge
+                if (proc.user.isNotEmpty()) {
                     Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                        color = if (proc.isRootUser) {
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+                        },
                         shape = RoundedCornerShape(4.dp)
                     ) {
                         Text(
-                            text = "PID: ${proc.pid}",
+                            text = if (proc.isRootUser) "用户: root" else "用户: ${proc.user}",
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = if (proc.isRootUser) FontWeight.Bold else FontWeight.Medium,
+                            color = if (proc.isRootUser) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false,
                             modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                         )
                     }
+                }
 
-                    // Memory Badge
-                    if (proc.memUsage.isNotEmpty() && proc.memUsage != "0") {
-                        Surface(
-                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.7f),
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "内存: ${proc.memUsage}",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-
-                    // CPU Badge (if available)
-                    if (proc.cpuUsage.isNotEmpty() && proc.cpuUsage != "0%" && proc.cpuUsage != "0.0%") {
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "CPU: ${proc.cpuUsage}",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
+                // Memory Badge
+                if (proc.memUsage.isNotEmpty() && proc.memUsage != "0") {
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = "内存: ${proc.memUsage}",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // Action Button: Right aligned
-            OutlinedButton(
-                onClick = onKill,
-                shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error
-                ),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier
-                    .align(Alignment.CenterVertically)
-                    .height(32.dp)
-            ) {
-                Icon(
-                    Icons.Default.Stop,
-                    contentDescription = null,
-                    modifier = Modifier.size(15.dp),
-                    tint = MaterialTheme.colorScheme.error
-                )
-                Spacer(modifier = Modifier.width(3.dp))
-                Text(
-                    text = if (isApp) "停止" else "结束",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.error
-                )
+                // CPU Badge (if available)
+                if (proc.cpuUsage.isNotEmpty() && proc.cpuUsage != "0%" && proc.cpuUsage != "0.0%") {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = "CPU: ${proc.cpuUsage}",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+                }
             }
         }
     }

@@ -17,8 +17,8 @@ android {
     applicationId = "com.yangyx.adbhelper"
     minSdk = 24
     targetSdk = 36
-    versionCode = 8
-    versionName = "1.7.0"
+    versionCode = 10
+    versionName = "1.9.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -86,6 +86,7 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.exifinterface)
   // implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -112,6 +113,10 @@ dependencies {
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
+  implementation(libs.bouncycastle.bcprov)
+  implementation(libs.bouncycastle.bcpkix)
+  implementation(libs.conscrypt.android)
+  implementation(libs.spake2)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)

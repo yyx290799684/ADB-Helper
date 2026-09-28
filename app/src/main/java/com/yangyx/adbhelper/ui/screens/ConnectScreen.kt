@@ -1,6 +1,7 @@
 package com.yangyx.adbhelper.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -33,6 +34,8 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -873,6 +876,37 @@ fun ConnectScreen(
                                     }
                                 }
                             }
+                            is PairResult.Paired -> {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(14.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "配对成功！",
+                                                fontWeight = FontWeight.Bold,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = currentResult.message,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
+                                }
+                            }
                             is PairResult.PairingPortDetected -> {
                                 Surface(
                                     color = MaterialTheme.colorScheme.secondaryContainer,
@@ -1044,6 +1078,20 @@ fun ConnectScreen(
                                 Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("立即连接 (${currentResult.port})")
+                            }
+                        }
+                        is PairResult.Paired -> {
+                            Button(
+                                onClick = {
+                                    ipAddress = currentResult.ip
+                                    showPairDialog = false
+                                    pairResult = null
+                                    Toast.makeText(context, "配对成功！已填入 IP：${currentResult.ip}，请查看被控端主页端口并填入连接", Toast.LENGTH_LONG).show()
+                                }
+                            ) {
+                                Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("填入 IP 并返回主页连接")
                             }
                         }
                         is PairResult.PairingPortDetected -> {
@@ -1248,6 +1296,7 @@ fun GroupedDeviceCard(
     val mainTitle = if (hasAlias) group.aliasName else {
         if (group.serialNo.isNotBlank()) "${group.deviceName} (${group.serialNo})" else group.deviceName
     }
+    var isExpanded by remember { mutableStateOf(false) }
     val subtitle = "共 ${group.ipRecords.size} 个网络记录"
 
     Card(
@@ -1257,7 +1306,9 @@ fun GroupedDeviceCard(
             containerColor = MaterialTheme.colorScheme.surface
         ),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize()
     ) {
         Column(
             modifier = Modifier
@@ -1269,7 +1320,7 @@ fun GroupedDeviceCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(10.dp))
-                    .clickable { onConnectSequentially() }
+                    .clickable { isExpanded = !isExpanded }
                     .padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1302,13 +1353,24 @@ fun GroupedDeviceCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = subtitle,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = subtitle,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Icon(
+                            imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (isExpanded) "折叠网络列表" else "展开网络列表",
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
 
                 // Edit Button (Custom Alias & Icon)
@@ -1356,14 +1418,17 @@ fun GroupedDeviceCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            Spacer(modifier = Modifier.height(8.dp))
+            // Collapsible IP Records List
+            AnimatedVisibility(visible = isExpanded) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-            // IP Records List with Order Adjustment and Single IP actions
-            Column(
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
+                    // IP Records List with Order Adjustment and Single IP actions
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                 group.ipRecords.forEachIndexed { index, item ->
                     val dateStr = remember(item.lastConnectedTime) {
                         SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(item.lastConnectedTime))
@@ -1513,4 +1578,6 @@ fun GroupedDeviceCard(
             }
         }
     }
+}
+}
 }

@@ -3,6 +3,18 @@ package com.yangyx.adbhelper.ui.models
 import androidx.compose.runtime.Immutable
 
 @Immutable
+data class DeviceDensityInfo(
+    val physicalDpi: Int = 0,
+    val overrideDpi: Int? = null,
+    val physicalSize: String = "",
+    val overrideSize: String? = null,
+    val isLoading: Boolean = false
+) {
+    val currentDpi: Int
+        get() = overrideDpi ?: physicalDpi
+}
+
+@Immutable
 data class SystemInfo(
     val model: String = "Unknown",
     val manufacturer: String = "Unknown",
@@ -60,8 +72,23 @@ data class RemoteProcessItem(
     val appTitle: String = "",
     val packageName: String = "",
     val isUserApp: Boolean = true,
-    val isSystemApp: Boolean = false
-)
+    val isSystemApp: Boolean = false,
+    val cmdline: String = "",
+    val args: String = ""
+) {
+    val isRootUser: Boolean
+        get() = user.trim().equals("root", ignoreCase = true) || user.trim() == "0"
+
+    /**
+     * Complete command line string if available, otherwise name
+     */
+    val fullCommandLine: String
+        get() = when {
+            cmdline.isNotBlank() -> cmdline
+            args.isNotBlank() -> "$name $args"
+            else -> name
+        }
+}
 
 @Immutable
 data class LocalAppItem(
@@ -125,6 +152,18 @@ enum class RebootOption(
         warningText = "⚠️ 警告：目标设备将直接关机。关机后无法通过网络远程唤醒，必须手动按下手机物理电源键开机。确定要关机吗？",
         isSevere = true
     )
+}
+
+enum class TouchpadMode(val title: String) {
+    MOUSE("鼠标光标模式"),
+    SWIPE("手势滑动模式")
+}
+
+enum class TouchpadProtocol(val title: String, val commandDesc: String) {
+    VIRTUAL_MOUSE("原生硬件鼠标", "Linux UHID/uinput 硬件设备模拟，显示原生小箭头指针"),
+    MOUSE_MOVE("mouse move", "adb shell input mouse move <x> <y>"),
+    MOUSE_ROLL("mouse roll", "adb shell input mouse roll <dx> <dy>"),
+    ROLL("trackball roll", "adb shell input roll <dx> <dy>")
 }
 
 

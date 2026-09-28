@@ -24,6 +24,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
@@ -37,12 +40,15 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SdCard
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -55,6 +61,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -78,7 +85,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.yangyx.adbhelper.adb.RemoteFileItem
 import com.yangyx.adbhelper.ui.AdbViewModel
+import com.yangyx.adbhelper.ui.components.ImageViewerDialog
 import com.yangyx.adbhelper.ui.components.TextEditorDialog
+import com.yangyx.adbhelper.ui.components.isImageFile
 import com.yangyx.adbhelper.ui.components.isTextFile
 
 private fun isHighRiskSystemDir(path: String): Boolean {
@@ -92,10 +101,22 @@ private fun isHighRiskSystemDir(path: String): Boolean {
             clean == "/apex" || clean.startsWith("/apex/")
 }
 
+enum class FileSortField(val label: String) {
+    NAME("文件名"),
+    SIZE("大小"),
+    TIME("创建/修改时间")
+}
+
+enum class FileSortOrder(val isAscending: Boolean, val label: String) {
+    ASCENDING(true, "正向"),
+    DESCENDING(false, "逆向")
+}
+
 @Composable
 fun FileExplorerScreen(
     viewModel: AdbViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isGlassMode: Boolean = false
 ) {
     val context = LocalContext.current
     val currentPath by viewModel.currentRemotePath.collectAsState()
@@ -103,12 +124,24 @@ fun FileExplorerScreen(
     val isLoading by viewModel.isFileLoading.collectAsState()
     val clipboard by viewModel.fileClipboard.collectAsState()
 
-    val sortedFiles by remember(remoteFiles) {
+    var sortField by remember { mutableStateOf(FileSortField.NAME) }
+    var sortOrder by remember { mutableStateOf(FileSortOrder.ASCENDING) }
+    var showSortMenu by remember { mutableStateOf(false) }
+
+    val sortedFiles by remember(remoteFiles, sortField, sortOrder) {
         derivedStateOf {
-            remoteFiles.sortedWith(
-                compareByDescending<RemoteFileItem> { it.isDirectory }
-                    .thenBy { it.name.lowercase() }
-            )
+            remoteFiles.sortedWith { a, b ->
+                if (a.isDirectory != b.isDirectory) {
+                    if (a.isDirectory) -1 else 1
+                } else {
+                    val comp = when (sortField) {
+                        FileSortField.NAME -> a.name.compareTo(b.name, ignoreCase = true)
+                        FileSortField.SIZE -> a.size.compareTo(b.size)
+                        FileSortField.TIME -> a.lastModified.compareTo(b.lastModified)
+                    }
+                    if (sortOrder.isAscending) comp else -comp
+                }
+            }
         }
     }
 
@@ -120,6 +153,7 @@ fun FileExplorerScreen(
     var renameNewName by remember { mutableStateOf("") }
     var fileToDownload by remember { mutableStateOf<RemoteFileItem?>(null) }
     var fileToEdit by remember { mutableStateOf<RemoteFileItem?>(null) }
+    var fileToViewImage by remember { mutableStateOf<RemoteFileItem?>(null) }
     var fileToPromptOpen by remember { mutableStateOf<RemoteFileItem?>(null) }
 
     var pendingRiskPath by remember { mutableStateOf<String?>(null) }
@@ -237,6 +271,12 @@ fun FileExplorerScreen(
                     label = { Text("下载目录", fontSize = 12.sp) }
                 )
                 FilterChip(
+                    selected = currentPath == "/sdcard/DCIM/Camera",
+                    onClick = { requestNavigate("/sdcard/DCIM/Camera") },
+                    leadingIcon = { Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                    label = { Text("相机相册", fontSize = 12.sp) }
+                )
+                FilterChip(
                     selected = currentPath == "/data" || currentPath.startsWith("/data/"),
                     onClick = { requestNavigate("/data") },
                     leadingIcon = { Icon(Icons.Default.FolderSpecial, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp)) },
@@ -254,6 +294,186 @@ fun FileExplorerScreen(
                     leadingIcon = { Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(14.dp)) },
                     label = { Text("系统核心", fontSize = 12.sp) }
                 )
+            }
+
+            // Status Bar with File Count and Single Unified Sort Selector
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "共 ${sortedFiles.size} 项",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Box {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier.clickable { showSortMenu = true }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Sort,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp),
+                                tint = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            val sortText = when (sortField) {
+                                FileSortField.NAME -> if (sortOrder == FileSortOrder.ASCENDING) "文件名: A → Z" else "文件名: Z → A"
+                                FileSortField.SIZE -> if (sortOrder == FileSortOrder.ASCENDING) "大小: 从小到大" else "大小: 从大到小"
+                                FileSortField.TIME -> if (sortOrder == FileSortOrder.ASCENDING) "时间: 从早到晚" else "时间: 最新在前"
+                            }
+                            Text(
+                                text = sortText,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = showSortMenu,
+                        onDismissRequest = { showSortMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "按文件名: A → Z (正向)",
+                                    fontWeight = if (sortField == FileSortField.NAME && sortOrder == FileSortOrder.ASCENDING) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (sortField == FileSortField.NAME && sortOrder == FileSortOrder.ASCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.ArrowUpward,
+                                    contentDescription = null,
+                                    tint = if (sortField == FileSortField.NAME && sortOrder == FileSortOrder.ASCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            onClick = {
+                                sortField = FileSortField.NAME
+                                sortOrder = FileSortOrder.ASCENDING
+                                showSortMenu = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "按文件名: Z → A (逆向)",
+                                    fontWeight = if (sortField == FileSortField.NAME && sortOrder == FileSortOrder.DESCENDING) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (sortField == FileSortField.NAME && sortOrder == FileSortOrder.DESCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.ArrowDownward,
+                                    contentDescription = null,
+                                    tint = if (sortField == FileSortField.NAME && sortOrder == FileSortOrder.DESCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            onClick = {
+                                sortField = FileSortField.NAME
+                                sortOrder = FileSortOrder.DESCENDING
+                                showSortMenu = false
+                            }
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "按文件大小: 从小到大 (正向)",
+                                    fontWeight = if (sortField == FileSortField.SIZE && sortOrder == FileSortOrder.ASCENDING) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (sortField == FileSortField.SIZE && sortOrder == FileSortOrder.ASCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.ArrowUpward,
+                                    contentDescription = null,
+                                    tint = if (sortField == FileSortField.SIZE && sortOrder == FileSortOrder.ASCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            onClick = {
+                                sortField = FileSortField.SIZE
+                                sortOrder = FileSortOrder.ASCENDING
+                                showSortMenu = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "按文件大小: 从大到小 (逆向)",
+                                    fontWeight = if (sortField == FileSortField.SIZE && sortOrder == FileSortOrder.DESCENDING) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (sortField == FileSortField.SIZE && sortOrder == FileSortOrder.DESCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.ArrowDownward,
+                                    contentDescription = null,
+                                    tint = if (sortField == FileSortField.SIZE && sortOrder == FileSortOrder.DESCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            onClick = {
+                                sortField = FileSortField.SIZE
+                                sortOrder = FileSortOrder.DESCENDING
+                                showSortMenu = false
+                            }
+                        )
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "按创建/修改时间: 从早到晚 (正向)",
+                                    fontWeight = if (sortField == FileSortField.TIME && sortOrder == FileSortOrder.ASCENDING) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (sortField == FileSortField.TIME && sortOrder == FileSortOrder.ASCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Schedule,
+                                    contentDescription = null,
+                                    tint = if (sortField == FileSortField.TIME && sortOrder == FileSortOrder.ASCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            onClick = {
+                                sortField = FileSortField.TIME
+                                sortOrder = FileSortOrder.ASCENDING
+                                showSortMenu = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "按创建/修改时间: 最新在前 (逆向)",
+                                    fontWeight = if (sortField == FileSortField.TIME && sortOrder == FileSortOrder.DESCENDING) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (sortField == FileSortField.TIME && sortOrder == FileSortOrder.DESCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Schedule,
+                                    contentDescription = null,
+                                    tint = if (sortField == FileSortField.TIME && sortOrder == FileSortOrder.DESCENDING) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            onClick = {
+                                sortField = FileSortField.TIME
+                                sortOrder = FileSortOrder.DESCENDING
+                                showSortMenu = false
+                            }
+                        )
+                    }
+                }
             }
 
             // Clipboard Action Banner (if active)
@@ -344,6 +564,7 @@ fun FileExplorerScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(bottom = if (isGlassMode) 100.dp else 24.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     items(
@@ -356,11 +577,16 @@ fun FileExplorerScreen(
                             onClick = {
                                 if (file.isDirectory) {
                                     requestNavigate(file.path)
-                                } else if (isTextFile(file.name, file.size)) {
+                                } else if (isImageFile(file.name, file.isDirectory)) {
+                                    fileToViewImage = file
+                                } else if (isTextFile(file.name, file.size, file.isDirectory)) {
                                     fileToEdit = file
                                 } else {
                                     fileToPromptOpen = file
                                 }
+                            },
+                            onOpenImageViewer = {
+                                fileToViewImage = file
                             },
                             onOpenTextEditor = {
                                 fileToEdit = file
@@ -392,7 +618,7 @@ fun FileExplorerScreen(
         Row(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(24.dp),
+                .padding(end = 24.dp, bottom = if (isGlassMode) 96.dp else 24.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             FloatingActionButton(
@@ -581,6 +807,23 @@ fun FileExplorerScreen(
             )
         }
 
+        // Image Viewer Dialog (Direct Preview of remote photos & graphics)
+        fileToViewImage?.let { target ->
+            val allImagesInDir = remember(sortedFiles) {
+                sortedFiles.filter { !it.isDirectory && isImageFile(it.name) }
+            }
+            ImageViewerDialog(
+                initialFile = target,
+                imageList = allImagesInDir,
+                viewModel = viewModel,
+                onDismiss = { fileToViewImage = null },
+                onDownload = {
+                    fileToDownload = target
+                    saveFileLauncher.launch(target.name)
+                }
+            )
+        }
+
         // Binary / Large File Open Confirmation Dialog
         fileToPromptOpen?.let { target ->
             AlertDialog(
@@ -628,6 +871,7 @@ fun FileExplorerScreen(
 fun FileItemRow(
     file: RemoteFileItem,
     onClick: () -> Unit,
+    onOpenImageViewer: () -> Unit,
     onOpenTextEditor: () -> Unit,
     onDownload: () -> Unit,
     onRename: () -> Unit,
@@ -636,7 +880,8 @@ fun FileItemRow(
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val isText = remember(file.name, file.size) { isTextFile(file.name, file.size) }
+    val isImage = remember(file.name, file.isDirectory) { isImageFile(file.name, file.isDirectory) }
+    val isText = remember(file.name, file.size, file.isDirectory) { isTextFile(file.name, file.size, file.isDirectory) }
 
     Card(
         shape = RoundedCornerShape(12.dp),
@@ -653,6 +898,7 @@ fun FileItemRow(
         ) {
             Surface(
                 color = if (file.isDirectory) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                else if (isImage) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                 else if (isText) MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
                 else MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
                 shape = CircleShape,
@@ -661,10 +907,12 @@ fun FileItemRow(
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = if (file.isDirectory) Icons.Default.Folder
+                        else if (isImage) Icons.Default.Image
                         else if (isText) Icons.Default.Description
                         else Icons.Default.InsertDriveFile,
                         contentDescription = "File Icon",
                         tint = if (file.isDirectory) MaterialTheme.colorScheme.primary
+                        else if (isImage) MaterialTheme.colorScheme.primary
                         else if (isText) MaterialTheme.colorScheme.tertiary
                         else MaterialTheme.colorScheme.secondary,
                         modifier = Modifier.size(20.dp)
@@ -682,15 +930,46 @@ fun FileItemRow(
                     maxLines = 1,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                if (!file.isDirectory) {
-                    val sizeFormatted = formatFileSize(file.size)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                val timeFormatted = remember(file.lastModified) { formatFileTime(file.lastModified) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (!file.isDirectory) {
+                        val sizeFormatted = formatFileSize(file.size)
                         Text(
                             text = sizeFormatted,
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        if (isText) {
+                        if (timeFormatted.isNotEmpty()) {
+                            Text(
+                                text = " · ",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                    if (timeFormatted.isNotEmpty()) {
+                        Text(
+                            text = timeFormatted,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                        )
+                    }
+                    if (!file.isDirectory) {
+                        if (isImage) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "图片",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        } else if (isText) {
                             Spacer(modifier = Modifier.width(6.dp))
                             Surface(
                                 color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.7f),
@@ -725,6 +1004,16 @@ fun FileItemRow(
                         onDismissRequest = { showMenu = false }
                     ) {
                         if (!file.isDirectory) {
+                            if (isImage) {
+                                DropdownMenuItem(
+                                    text = { Text("查看图片") },
+                                    leadingIcon = { Icon(Icons.Default.Image, contentDescription = null) },
+                                    onClick = {
+                                        showMenu = false
+                                        onOpenImageViewer()
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("查看/编辑文本") },
                                 leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
@@ -793,6 +1082,16 @@ private fun formatFileSize(bytes: Long): String {
         bytes >= 1024L * 1024L -> String.format(java.util.Locale.US, "%.2f MB", bytes / (1024.0 * 1024.0))
         bytes >= 1024L -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
         else -> "$bytes B"
+    }
+}
+
+private fun formatFileTime(timestamp: Long): String {
+    if (timestamp <= 0L) return ""
+    return try {
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+        sdf.format(java.util.Date(timestamp))
+    } catch (_: Exception) {
+        ""
     }
 }
 
