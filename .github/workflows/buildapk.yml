@@ -28,7 +28,7 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    # 1. 恢复或生成固定的签名密钥（保证每次签名一致，支持无缝覆盖升级）
+    # 1. 恢复或生成固定的签名密钥
     - name: Restore KeyStore from Cache
       id: keystore-cache
       uses: actions/cache@v4
@@ -50,21 +50,42 @@ jobs:
           -keypass adbhelper123 \
           -dname "CN=ADB Helper, OU=Dev, O=ADB Helper, L=Hangzhou, ST=Zhejiang, C=CN"
 
-    # 2. 编译 Release APK
+    # 2. 编译 Release APK (此时生成的是未签名或默认对齐的apk)
     - name: Build Release APK
       run: ./gradlew assembleRelease
 
-    # 3. 使用固定密钥签名 APK
-    - name: Sign APK
-      uses: rstyle/sign-android-release@v1
-      with:
-        releaseDirectory: app/build/outputs/apk/release
-        keystorePath: /home/runner/.android/adbhelper-release.jks
-        alias: adbhelper
-        keyStorePassword: adbhelper123
-        keyPassword: adbhelper123
+    # 3. 使用 Android 原生 apksigner 工具进行签名（不依赖第三方 Action）
+    - name: Sign APK with apksigner
+      run: |
+        # 寻找构建好的 unsigned / unaligned apk 文件
+        APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+        echo "Found APK: $APK_PATH"
+        
+        # 寻找 Android SDK 中的 apksigner 路径
+        BUILD_TOOLS_VERSION=$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -n 1)
+        APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+        
+        if [ ! -f "$APKSIGNER" ]; then
+          echo "apksigner not found at $APKSIGNER, trying alternative path..."
+          APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools -name "apksigner" | tail -n 1)
+        fi
+        
+        echo "Using apksigner: $APKSIGNER"
+        
+        # 执行签名
+        $APKSIGNER sign \
+          --ks "$HOME/.android/adbhelper-release.jks" \
+          --ks-key-alias adbhelper \
+          --ks-pass pass:adbhelper123 \
+          --key-pass pass:adbhelper123 \
+          "$APK_PATH"
+          
+        # 重命名为带 signed 的文件名方便识别
+        SIGNED_APK="${APK_PATH//.apk/-signed.apk}"
+        mv "$APK_PATH" "$SIGNED_APK"
+        echo "Signed APK successfully: $SIGNED_APK"
 
-    # 4. 自动提取 app/build.gradle.kts 中的 versionName 并发布 Release
+    # 4. 自动提取 versionName 并发布 Release
     - name: Extract Version and Release
       run: |
         VERSION_NAME=$(grep "versionName" app/build.gradle.kts | head -n 1 | sed -E 's/.*versionName[[:space:]]*=[[:space:]]*["\x27]([^"\x27]+)["\x27].*/\1/')
@@ -84,7 +105,7 @@ jobs:
         name: ADB-Helper v${{ env.VERSION_NAME }}
         body: |
           ### 🚀 自动构建版本 v${{ env.VERSION_NAME }}
-          - 对应源码版本构建
+          - 使用原生 apksigner 签名
           - 已启用云端密钥缓存，支持无缝覆盖升级
         draft: false
         prerelease: false
