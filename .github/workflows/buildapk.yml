@@ -25,7 +25,7 @@ jobs:
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
 
-    # 1. 自动生成或补全 gradlew 脚本，防止找不到文件报错
+    # 1. 自动生成或补全 gradlew 脚本
     - name: Generate Gradle Wrapper
       run: |
         if [ ! -f "gradlew" ]; then
@@ -33,7 +33,7 @@ jobs:
         fi
         chmod +x gradlew
 
-    # 2. 恢复或生成固定的签名密钥
+    # 2. 恢复或生成固定的签名密钥，并将其复制到项目根目录下的 my-upload-key.jks
     - name: Restore KeyStore from Cache
       id: keystore-cache
       uses: actions/cache@v4
@@ -41,51 +41,34 @@ jobs:
         path: ~/.android/adbhelper-release.jks
         key: adbhelper-fixed-keystore-v1
 
-    - name: Generate KeyStore if not exists
-      if: steps.keystore-cache.outputs.cache-hit != 'true'
+    - name: Prepare Signing Key
       run: |
         mkdir -p ~/.android
-        keytool -genkeypair -v \
-          -keystore "$HOME/.android/adbhelper-release.jks" \
-          -alias adbhelper \
-          -keyalg RSA \
-          -keysize 2048 \
-          -validity 10000 \
-          -storepass adbhelper123 \
-          -keypass adbhelper123 \
-          -dname "CN=ADB Helper, OU=Dev, O=ADB Helper, L=Hangzhou, ST=Zhejiang, C=CN"
+        KEYSTORE_PATH="$HOME/.android/adbhelper-release.jks"
+        
+        # 如果缓存没有，则生成一个新的
+        if [ ! -f "$KEYSTORE_PATH" ]; then
+          echo "Generating new persistent release keystore..."
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_PATH" \
+            -alias adbhelper \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass adbhelper123 \
+            -keypass adbhelper123 \
+            -dname "CN=ADB Helper, OU=Dev, O=ADB Helper, L=Hangzhou, ST=Zhejiang, C=CN"
+        fi
+        
+        # 复制到项目根目录，供 Gradle 的 build.gradle.kts 直接读取
+        cp "$KEYSTORE_PATH" ./my-upload-key.jks
+        echo "Successfully placed my-upload-key.jks in root directory."
 
-    # 3. 编译 Release APK
+    # 3. 直接编译 Release APK（Gradle 会自动使用根目录的 my-upload-key.jks 签名）
     - name: Build Release APK
       run: ./gradlew assembleRelease
 
-    # 4. 使用 Android 原生 apksigner 工具进行签名
-    - name: Sign APK with apksigner
-      run: |
-        APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-        echo "Found APK: $APK_PATH"
-        
-        BUILD_TOOLS_VERSION=$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -n 1)
-        APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/apksigner"
-        
-        if [ ! -f "$APKSIGNER" ]; then
-          APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools -name "apksigner" | tail -n 1)
-        fi
-        
-        echo "Using apksigner: $APKSIGNER"
-        
-        $APKSIGNER sign \
-          --ks "$HOME/.android/adbhelper-release.jks" \
-          --ks-key-alias adbhelper \
-          --ks-pass pass:adbhelper123 \
-          --key-pass pass:adbhelper123 \
-          "$APK_PATH"
-          
-        SIGNED_APK="${APK_PATH//.apk/-signed.apk}"
-        mv "$APK_PATH" "$SIGNED_APK"
-        echo "Signed APK successfully: $SIGNED_APK"
-
-    # 5. 自动提取 versionName 并发布 Release
+    # 4. 自动提取 versionName 并发布 Release
     - name: Extract Version and Release
       run: |
         VERSION_NAME=$(grep "versionName" app/build.gradle.kts | head -n 1 | sed -E 's/.*versionName[[:space:]]*=[[:space:]]*["\x27]([^"\x27]+)["\x27].*/\1/')
@@ -100,12 +83,12 @@ jobs:
     - name: Publish GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        files: app/build/outputs/apk/release/*-signed.apk
+        files: app/build/outputs/apk/release/*.apk
         tag_name: v${{ env.VERSION_NAME }}
         name: ADB-Helper v${{ env.VERSION_NAME }}
         body: |
           ### 🚀 自动构建版本 v${{ env.VERSION_NAME }}
-          - 使用原生 apksigner 签名
+          - 完美适配项目自带签名配置
           - 已启用云端密钥缓存，支持无缝覆盖升级
         draft: false
         prerelease: false
