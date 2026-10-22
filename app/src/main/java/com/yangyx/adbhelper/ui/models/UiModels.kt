@@ -15,6 +15,78 @@ data class DeviceDensityInfo(
 }
 
 @Immutable
+data class DeviceQuickSettingsState(
+    val isBluetoothOn: Boolean = false,
+    val isWifiOn: Boolean = false,
+    val ringerMode: Int = 2, // 0: Silent, 1: Vibrate, 2: Normal
+    val isZenModeOn: Boolean = false, // 勿扰模式 (zen_mode > 0)
+    val zenMode: Int = 0,
+    val isLocationOn: Boolean = false, // 定位服务
+    val isNfcOn: Boolean = false,
+    val hasNfc: Boolean = true,
+    val isAutoRotateOn: Boolean = false, // 自动旋转
+    val brightness: Int = 128, // 0..255
+    val isAutoBrightnessOn: Boolean = false, // 自动亮度
+    val isMobileDataOn: Boolean = false,
+    val isLoading: Boolean = false
+) {
+    val isMuteOn: Boolean
+        get() = ringerMode == 0 || ringerMode == 1
+
+    val brightnessPercent: Int
+        get() = BrightnessConverter.rawBrightnessToPercent(brightness)
+}
+
+@Immutable
+data class MediaPlaybackInfo(
+    val hasActiveSession: Boolean = false,
+    val isPlaying: Boolean = false,
+    val title: String = "",
+    val artist: String = "",
+    val album: String = "",
+    val packageName: String = "",
+    val appName: String = "",
+    val durationMs: Long = 0L,
+    val positionMs: Long = 0L,
+    val stateCode: Int = 0, // 3: Playing, 2: Paused, 1: Stopped, 6: Buffering
+    val stateText: String = "未在播放",
+    val isLoading: Boolean = false
+) {
+    val displayTitle: String
+        get() = title.ifBlank { if (hasActiveSession) "未知曲目/媒体" else "暂无媒体播放" }
+
+    val displayArtist: String
+        get() = when {
+            artist.isNotBlank() && album.isNotBlank() && artist != album -> "$artist · $album"
+            artist.isNotBlank() -> artist
+            album.isNotBlank() -> album
+            appName.isNotBlank() -> appName
+            else -> ""
+        }
+
+    val progress: Float
+        get() = if (durationMs > 0 && positionMs >= 0) {
+            (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+
+    val positionText: String
+        get() = formatTime(positionMs)
+
+    val durationText: String
+        get() = if (durationMs > 0) formatTime(durationMs) else ""
+
+    private fun formatTime(ms: Long): String {
+        if (ms <= 0) return "00:00"
+        val totalSec = ms / 1000
+        val min = totalSec / 60
+        val sec = totalSec % 60
+        return "%02d:%02d".format(min, sec)
+    }
+}
+
+@Immutable
 data class SystemInfo(
     val model: String = "Unknown",
     val manufacturer: String = "Unknown",
@@ -45,7 +117,8 @@ data class GroupedDevice(
     val aliasName: String = "",
     val iconType: String = "phone",
     val lastConnectedTime: Long,
-    val ipRecords: List<com.yangyx.adbhelper.data.entity.DeviceEntity>
+    val ipRecords: List<com.yangyx.adbhelper.data.entity.DeviceEntity>,
+    val isManuallyOrdered: Boolean = false
 ) {
     val displayName: String
         get() = if (aliasName.isNotBlank()) aliasName else deviceName

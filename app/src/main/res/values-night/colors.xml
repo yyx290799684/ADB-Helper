@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- HyperOS / Material Widget Color Palette (Dark Mode) -->
+    <color name="widget_card_bg">#FF1E2024</color>
+    <color name="widget_card_stroke">#26FFFFFF</color>
+    <color name="widget_tile_bg">#FF2A2C32</color>
+    <color name="widget_tile_bg_secondary">#FF25272C</color>
+    <color name="widget_accent">#FF0A84FF</color>
+    <color name="widget_accent_bg">#260A84FF</color>
+    <color name="widget_text_primary">#FFF9FAFB</color>
+    <color name="widget_text_secondary">#FF9CA3AF</color>
+    <color name="widget_text_tertiary">#FF6B7280</color>
+    <color name="widget_status_connected">#FF34D399</color>
+    <color name="widget_status_disconnected">#FF6B7280</color>
+    <color name="widget_status_connecting">#FFFBBF24</color>
+    <color name="widget_danger">#FFF87171</color>
+    <color name="widget_white">#FFFFFFFF</color>
+</resources>

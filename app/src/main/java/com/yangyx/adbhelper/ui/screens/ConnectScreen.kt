@@ -86,6 +86,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -105,10 +112,13 @@ import java.util.Locale
 fun ConnectScreen(
     viewModel: AdbViewModel,
     onNavigateToRemote: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenSessionManager: (() -> Unit)? = null
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
     val groupedDevices by viewModel.groupedDevices.collectAsState()
+    val sessions by viewModel.sessions.collectAsState()
+    val currentSessionId by viewModel.currentSessionId.collectAsState()
 
     val isScanningLan by viewModel.isScanningLan.collectAsState()
     val scanProgress by viewModel.scanProgress.collectAsState()
@@ -201,6 +211,153 @@ fun ConnectScreen(
         contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 56.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Multi-Session Active Status Banner
+        if (sessions.isNotEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f)
+                    ),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = Color(0xFF2E7D32),
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.Sensors,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "后台运行中的会话 (${sessions.size} 台设备)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                                Text(
+                                    text = "多设备独立并行，可随时切换或继续连接新设备",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                                )
+                            }
+                            TextButton(
+                                onClick = { onOpenSessionManager?.invoke() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Text("管理会话 >", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        sessions.forEach { sess ->
+                            val isCur = sess.id == currentSessionId
+                            val scrcpyState by sess.scrcpyController.screenState.collectAsState()
+                            val isStreaming = scrcpyState is com.yangyx.adbhelper.scrcpy.ScreenState.Streaming
+
+                            Surface(
+                                onClick = {
+                                    viewModel.switchSession(sess.id)
+                                    onNavigateToRemote()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isCur) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                                border = if (isCur) BorderStroke(1.2.dp, MaterialTheme.colorScheme.primary) else BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isStreaming) Color(0xFF4CAF50) else Color(0xFF2196F3))
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = sess.deviceName,
+                                                fontSize = 13.sp,
+                                                fontWeight = if (isCur) FontWeight.Bold else FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (isCur) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = Color(0xFF2E7D32)
+                                                ) {
+                                                    Text(
+                                                        text = "当前控制",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = Color.White,
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        val statusDesc = if (isStreaming) "投屏运行中" else when (sess.selectedNavIndex) {
+                                            1 -> "文件管理中"
+                                            2 -> "终端交互中"
+                                            3 -> "设备信息"
+                                            4 -> "应用进程"
+                                            else -> "待命中"
+                                        }
+                                        Text(
+                                            text = "${sess.ip} · $statusDesc",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    FilledTonalButton(
+                                        onClick = {
+                                            viewModel.switchSession(sess.id)
+                                            onNavigateToRemote()
+                                        },
+                                        modifier = Modifier.height(28.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+                                    ) {
+                                        Text("进入", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "提示：可在下方直接输入 IP 或扫描连接新设备，连接后将自动创建新会话独立运行。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+            }
+        }
+
         // Hero Connection Banner Card
         item {
             Card(
@@ -396,27 +553,7 @@ fun ConnectScreen(
                             }
                         }
                         is ConnectionState.Connected -> {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Surface(
-                                color = Color(0xFF1B5E20),
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Default.CheckCircle, contentDescription = "Connected", tint = Color.Green)
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text("已连接至: ${state.deviceName}", color = Color.White, fontWeight = FontWeight.Bold)
-                                        Text("IP: ${state.ip}", color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
-                                    }
-                                    TextButton(onClick = onNavigateToRemote) {
-                                        Text("进入屏幕控制 >", color = Color.Green, fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
+                            // 已经连接设备，回到首页连接新设备时，在此卡片下方不再重复显示绿色的已连接提示
                         }
                         is ConnectionState.Error -> {
                             Spacer(modifier = Modifier.height(12.dp))
@@ -747,6 +884,9 @@ fun ConnectScreen(
                     },
                     onDeleteGroup = {
                         pendingDeleteGroup = group
+                    },
+                    onUnlockManualOrder = {
+                        viewModel.unlockGroupManualOrder(group)
                     }
                 )
             }
@@ -1274,6 +1414,7 @@ fun ConnectScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GroupedDeviceCard(
     group: GroupedDevice,
@@ -1283,8 +1424,13 @@ fun GroupedDeviceCard(
     onMoveUp: (Int) -> Unit,
     onMoveDown: (Int) -> Unit,
     onDeleteSingleIp: (DeviceEntity) -> Unit,
-    onDeleteGroup: () -> Unit
+    onDeleteGroup: () -> Unit,
+    onUnlockManualOrder: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
+
     val deviceIcon = when (group.iconType.lowercase()) {
         "tablet" -> Icons.Default.TabletAndroid
         "tv" -> Icons.Default.Tv
@@ -1468,32 +1614,47 @@ fun GroupedDeviceCard(
 
                                 Spacer(modifier = Modifier.width(6.dp))
 
-                                if (isIpv6) {
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f),
-                                        shape = RoundedCornerShape(4.dp),
-                                        modifier = Modifier.padding(end = 5.dp)
-                                    ) {
-                                        Text(
-                                            text = "IPv6",
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onTertiaryContainer,
-                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .combinedClickable(
+                                            onClick = { /* 单击可用于选中或查看 */ },
+                                            onLongClick = {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                clipboardManager.setText(AnnotatedString(displayIp))
+                                                Toast.makeText(context, "已复制 IP:Port: $displayIp", Toast.LENGTH_SHORT).show()
+                                            }
                                         )
+                                        .padding(vertical = 2.dp, horizontal = 2.dp)
+                                ) {
+                                    if (isIpv6) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f),
+                                            shape = RoundedCornerShape(4.dp),
+                                            modifier = Modifier.padding(end = 5.dp)
+                                        ) {
+                                            Text(
+                                                text = "IPv6",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
                                     }
-                                }
 
-                                Text(
-                                    text = displayIp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = if (isIpv6) 12.sp else 13.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
+                                    Text(
+                                        text = displayIp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = if (isIpv6) 12.sp else 13.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
 
                                 Spacer(modifier = Modifier.width(6.dp))
 
@@ -1526,6 +1687,22 @@ fun GroupedDeviceCard(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                                     modifier = Modifier.weight(1f)
                                 )
+
+                                // 手工调整持久化记忆锁定标记：点击可解除固定排序
+                                if (group.isManuallyOrdered) {
+                                    IconButton(
+                                        onClick = onUnlockManualOrder,
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = "已开启手工排序持久锁定，点击可解锁恢复自动排序",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                }
 
                                 // Move Up
                                 IconButton(

@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">ADB Helper</string>
+    <string name="widget_2x2_name">ADB 快捷连接 (2x2)</string>
+    <string name="widget_2x2_desc">实时显示 ADB 设备连接状态，提供一键重连与锁屏、截屏快捷操作。</string>
+    <string name="widget_4x2_name">ADB 控制中心 (4x2)</string>
+    <string name="widget_4x2_desc">ADB 远端控制中心，支持设备快速连接、锁屏、截屏、镜像投屏与主页快捷键。</string>
 </resources>

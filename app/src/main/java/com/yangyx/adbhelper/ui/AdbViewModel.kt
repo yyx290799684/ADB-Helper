@@ -21,6 +21,8 @@ import com.yangyx.adbhelper.data.AppDatabase
 import com.yangyx.adbhelper.data.entity.DeviceEntity
 import com.yangyx.adbhelper.data.repository.AdbRepository
 import com.yangyx.adbhelper.scrcpy.ScrcpyController
+import com.yangyx.adbhelper.scrcpy.ScreenState
+import com.yangyx.adbhelper.ui.models.AdbDeviceSession
 import com.yangyx.adbhelper.ui.models.AppAnalysisReport
 import com.yangyx.adbhelper.ui.models.BottomBarMode
 import com.yangyx.adbhelper.ui.models.GlassTranslucency
@@ -35,11 +37,15 @@ import com.yangyx.adbhelper.ui.models.LocalAppItem
 import com.yangyx.adbhelper.ui.models.RemoteAppItem
 import com.yangyx.adbhelper.ui.models.RemoteProcessItem
 import com.yangyx.adbhelper.ui.models.DeviceDensityInfo
+import com.yangyx.adbhelper.ui.models.DeviceQuickSettingsState
+import com.yangyx.adbhelper.ui.models.MediaPlaybackInfo
 import com.yangyx.adbhelper.ui.models.SystemInfo
 import com.yangyx.adbhelper.ui.models.TouchpadMode
 import com.yangyx.adbhelper.ui.models.TouchpadProtocol
 import com.yangyx.adbhelper.input.VirtualMouseManager
 import com.yangyx.adbhelper.input.VirtualMouseStatus
+import com.yangyx.adbhelper.widget.WidgetStateHolder
+import com.yangyx.adbhelper.widget.WidgetUpdateHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -118,8 +124,49 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application)
     private val repository = AdbRepository(db.deviceDao(), db.commandDao(), application)
+    private val devicePrefs = application.getSharedPreferences("device_settings_prefs", android.content.Context.MODE_PRIVATE)
+
+    private fun markGroupManuallyOrdered(group: GroupedDevice) {
+        val editor = devicePrefs.edit()
+        if (group.serialNo.isNotBlank()) {
+            editor.putBoolean("manual_order_serial_${group.serialNo}", true)
+        }
+        if (group.key.isNotBlank()) {
+            editor.putBoolean("manual_order_group_${group.key}", true)
+        }
+        group.ipRecords.forEach { record ->
+            if (record.id != 0L) {
+                editor.putBoolean("manual_order_id_${record.id}", true)
+            }
+            editor.putBoolean("manual_order_ip_${record.ipAddress}_${record.port}", true)
+        }
+        editor.apply()
+    }
+
+    private fun isGroupManuallyOrdered(
+        groupKey: String = "",
+        serialNo: String = "",
+        ipRecords: List<DeviceEntity> = emptyList()
+    ): Boolean {
+        if (serialNo.isNotBlank() && devicePrefs.getBoolean("manual_order_serial_$serialNo", false)) {
+            return true
+        }
+        if (groupKey.isNotBlank() && devicePrefs.getBoolean("manual_order_group_$groupKey", false)) {
+            return true
+        }
+        for (rec in ipRecords) {
+            if (rec.id != 0L && devicePrefs.getBoolean("manual_order_id_${rec.id}", false)) {
+                return true
+            }
+            if (devicePrefs.getBoolean("manual_order_ip_${rec.ipAddress}_${rec.port}", false)) {
+                return true
+            }
+        }
+        return false
+    }
 
     init {
+        currentInstance = this
         viewModelScope.launch(Dispatchers.IO) {
             repository.checkAndRestoreBackupIfNeeded()
         }
@@ -134,6 +181,98 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000), emptyList())
 
+    /**
+     * 从桌面小部件快速发起与最近/常用设备的连接
+     */
+    fun connectLatestDevice() {
+        if (_connectionState.value is ConnectionState.Connected) {
+            _actionMessage.value = "设备已处于连接状态"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val groups = groupedDevices.value
+            if (groups.isNotEmpty()) {
+                val target = groups.first()
+                withContext(Dispatchers.Main) {
+                    connectDeviceSequentially(target)
+                }
+            } else {
+                val list = repository.getAllDevicesDirect()
+                val latest = list.firstOrNull()
+                if (latest != null) {
+                    withContext(Dispatchers.Main) {
+                        connectToDevice(latest.ipAddress, latest.port, targetAlias = latest.aliasName.ifBlank { null })
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        _actionMessage.value = "暂无已保存的 ADB 设备，请在 App 中扫描或添加"
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 小部件快捷连接：优先按 serialNo 匹配，其次按设备名称匹配，最后按 IP 匹配。
+     * 匹配到物理设备组后，自动依次尝试该设备名下的所有 IP:Port（带有 1s 端口探测与顺序回退）。
+     * 若未匹配到组，则使用 fallbackIp:fallbackPort 进行单点连接。
+     */
+    fun connectDeviceSmart(
+        serialNo: String = "",
+        deviceName: String = "",
+        fallbackIp: String = "",
+        fallbackPort: Int = 5555
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            var groups = groupedDevices.value
+            if (groups.isEmpty()) {
+                val directList = repository.getAllDevicesDirect()
+                if (directList.isNotEmpty()) {
+                    groups = groupDevicesBySerial(directList)
+                }
+            }
+
+            // 1. 优先按 serialNo 匹配
+            var matchedGroup: GroupedDevice? = null
+            if (serialNo.isNotBlank()) {
+                matchedGroup = groups.firstOrNull { it.serialNo == serialNo }
+            }
+
+            // 2. 其次按名称匹配
+            if (matchedGroup == null && deviceName.isNotBlank()) {
+                matchedGroup = groups.firstOrNull { g ->
+                    g.displayName.equals(deviceName, ignoreCase = true) ||
+                    g.deviceName.equals(deviceName, ignoreCase = true) ||
+                    g.aliasName.equals(deviceName, ignoreCase = true) ||
+                    g.ipRecords.any { it.aliasName.equals(deviceName, ignoreCase = true) || it.name.equals(deviceName, ignoreCase = true) }
+                }
+            }
+
+            // 3. 再次按 fallbackIp 匹配组
+            if (matchedGroup == null && fallbackIp.isNotBlank()) {
+                matchedGroup = groups.firstOrNull { g ->
+                    g.ipRecords.any { it.ipAddress == fallbackIp }
+                }
+            }
+
+            withContext(Dispatchers.Main) {
+                if (matchedGroup != null && matchedGroup.ipRecords.isNotEmpty()) {
+                    connectDeviceSequentially(matchedGroup)
+                } else if (fallbackIp.isNotBlank()) {
+                    connectToDevice(
+                        ip = fallbackIp,
+                        port = fallbackPort,
+                        targetAlias = deviceName.ifBlank { null }
+                    )
+                } else if (groups.isNotEmpty()) {
+                    connectDeviceSequentially(groups.first())
+                } else {
+                    _actionMessage.value = "未找到可连接的目标设备，请进入应用添加"
+                }
+            }
+        }
+    }
+
     private fun groupDevicesBySerial(devices: List<DeviceEntity>): List<GroupedDevice> {
         val withSerial = devices.filter { it.serialNo.isNotBlank() }
         val withoutSerial = devices.filter { it.serialNo.isBlank() }
@@ -141,10 +280,19 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         val groups = mutableListOf<GroupedDevice>()
 
         withSerial.groupBy { it.serialNo }.forEach { (serial, list) ->
-            val sortedIps = list.sortedWith(
-                compareBy<DeviceEntity> { it.sortOrder }
-                    .thenByDescending { it.lastConnectedTime }
+            val isManual = isGroupManuallyOrdered(
+                groupKey = "serial_$serial",
+                serialNo = serial,
+                ipRecords = list
             )
+            val sortedIps = if (isManual) {
+                list.sortedBy { it.sortOrder }
+            } else {
+                list.sortedWith(
+                    compareBy<DeviceEntity> { it.sortOrder }
+                        .thenByDescending { it.lastConnectedTime }
+                )
+            }
             val bestName = sortedIps.firstOrNull { it.name.isNotBlank() }?.name ?: "Android 设备"
             val bestModel = sortedIps.firstOrNull { it.model.isNotBlank() }?.model ?: ""
             val bestAlias = sortedIps.firstOrNull { it.aliasName.isNotBlank() }?.aliasName ?: ""
@@ -160,7 +308,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     aliasName = bestAlias,
                     iconType = bestIcon,
                     lastConnectedTime = latestTime,
-                    ipRecords = sortedIps
+                    ipRecords = sortedIps,
+                    isManuallyOrdered = isManual
                 )
             )
         }
@@ -212,6 +361,18 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     var scrcpyController: ScrcpyController? = null
         private set
 
+    // 多会话管理状态
+    private val _sessions = MutableStateFlow<List<AdbDeviceSession>>(emptyList())
+    val sessions: StateFlow<List<AdbDeviceSession>> = _sessions.asStateFlow()
+
+    private val _currentSessionId = MutableStateFlow<String?>(null)
+    val currentSessionId: StateFlow<String?> = _currentSessionId.asStateFlow()
+
+    val currentSession: AdbDeviceSession?
+        get() = _sessions.value.firstOrNull { it.id == _currentSessionId.value }
+
+
+
     // 虚拟硬件鼠标驱动管理器 (Linux UHID / UINPUT 原生硬件鼠标模拟，唤出原生指针)
     val virtualMouseManager = VirtualMouseManager({ activeConnection }, viewModelScope)
     val virtualMouseStatus: StateFlow<VirtualMouseStatus> = virtualMouseManager.status
@@ -237,6 +398,15 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     // Terminal state
     companion object {
         const val MAX_TERMINAL_BUFFER_LINES = 6000
+
+        @Volatile
+        var currentInstance: AdbViewModel? = null
+
+        fun getOrCreate(application: Application): AdbViewModel {
+            return currentInstance ?: synchronized(this) {
+                currentInstance ?: AdbViewModel(application).also { currentInstance = it }
+            }
+        }
     }
 
     private val _terminalOutput = MutableStateFlow("ADB Helper Terminal\nReady for input...\n\nshell@android:/ $ ")
@@ -344,6 +514,103 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    // Background Screen Mirroring Timeout (minutes): 1, 3, 5, 10, 30, -1 (Infinite)
+    // Default: 3 minutes
+    private val _backgroundMirroringTimeoutMinutes = MutableStateFlow(
+        uiPrefs.getInt("bg_mirroring_timeout_min", 3)
+    )
+    val backgroundMirroringTimeoutMinutes: StateFlow<Int> = _backgroundMirroringTimeoutMinutes.asStateFlow()
+
+    private val _isHomeScreenActive = MutableStateFlow(false)
+    val isHomeScreenActive: StateFlow<Boolean> = _isHomeScreenActive.asStateFlow()
+
+    fun setBackgroundMirroringTimeoutMinutes(minutes: Int) {
+        _backgroundMirroringTimeoutMinutes.value = minutes
+        uiPrefs.edit().putInt("bg_mirroring_timeout_min", minutes).apply()
+    }
+
+    fun setHomeScreenActive(active: Boolean) {
+        _isHomeScreenActive.value = active
+        val currentId = _currentSessionId.value ?: return
+        val current = _sessions.value.firstOrNull { it.id == currentId } ?: return
+        if (active) {
+            val isStreaming = current.scrcpyController.screenState.value is ScreenState.Streaming ||
+                    current.scrcpyController.screenState.value is ScreenState.Connecting
+            if (isStreaming) {
+                if (current.backgroundTimestamp <= 0L) {
+                    current.backgroundTimestamp = System.currentTimeMillis()
+                }
+                current.autoResumeMirroringOnSwitch = true
+            } else {
+                current.backgroundTimestamp = 0L
+                current.autoResumeMirroringOnSwitch = false
+            }
+        } else {
+            current.backgroundTimestamp = 0L
+            if (current.autoResumeMirroringOnSwitch &&
+                current.scrcpyController.screenState.value !is ScreenState.Streaming &&
+                current.scrcpyController.screenState.value !is ScreenState.Connecting) {
+                current.autoResumeMirroringOnSwitch = false
+                current.scrcpyController.startMirroring()
+                _actionMessage.value = "已返回会话: ${current.deviceName} (已自动恢复投屏)"
+            }
+            current.scrcpyController.triggerRemoteScreenRefresh()
+        }
+    }
+
+    private var bgMirroringWatchJob: Job? = null
+
+    private fun startBackgroundMirroringWatcher() {
+        bgMirroringWatchJob?.cancel()
+        bgMirroringWatchJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(3000)
+                val timeoutMin = _backgroundMirroringTimeoutMinutes.value
+                val activeId = _currentSessionId.value
+                val isHome = _isHomeScreenActive.value
+                val now = System.currentTimeMillis()
+
+                if (timeoutMin > 0) {
+                    val timeoutMillis = timeoutMin * 60 * 1000L
+                    _sessions.value.forEach { session ->
+                        val isBackground = (session.id != activeId) || isHome
+                        if (isBackground) {
+                            val isStreaming = session.scrcpyController.screenState.value is ScreenState.Streaming ||
+                                    session.scrcpyController.screenState.value is ScreenState.Connecting
+                            if (isStreaming) {
+                                if (session.backgroundTimestamp <= 0L) {
+                                    session.backgroundTimestamp = now
+                                } else {
+                                    val elapsed = now - session.backgroundTimestamp
+                                    if (elapsed >= timeoutMillis) {
+                                        // 后台投屏超时，自动停止投屏释放被控端与本机算力/带宽资源（保留 ADB 会话）
+                                        session.autoResumeMirroringOnSwitch = true
+                                        session.backgroundTimestamp = 0L
+                                        session.scrcpyController.stopMirroring()
+                                        val displayDevName = session.displayName.ifBlank { session.deviceName }
+                                        _actionMessage.value = "会话 [$displayDevName] 后台投屏已达 ${timeoutMin} 分钟，已自动停止投屏以节省资源"
+                                    }
+                                }
+                            } else {
+                                if (!session.autoResumeMirroringOnSwitch) {
+                                    session.backgroundTimestamp = 0L
+                                }
+                            }
+                        } else {
+                            session.backgroundTimestamp = 0L
+                        }
+                    }
+                } else {
+                    _sessions.value.forEach { session ->
+                        if (session.id == activeId && !isHome) {
+                            session.backgroundTimestamp = 0L
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private val defaultShortcuts = listOf(
         "getprop ro.product.model",
         "pm list packages -3",
@@ -442,6 +709,85 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setProcessFilterMode(mode: Int) {
         _processFilterMode.value = mode
+    }
+
+    var autoStartMirrorOnConnect: Boolean = false
+
+    fun triggerMirrorFromWidget() {
+        val session = currentSession
+        if (session != null) {
+            val controller = session.scrcpyController
+            val state = controller.screenState.value
+            if (state !is ScreenState.Streaming && state !is ScreenState.Connecting) {
+                controller.startMirroring()
+                _actionMessage.value = "已启动投屏: ${session.deviceName}"
+            } else {
+                controller.triggerRemoteScreenRefresh()
+                _actionMessage.value = "已切至投屏会话: ${session.deviceName}"
+            }
+        } else if (_connectionState.value is ConnectionState.Connected) {
+            val controller = scrcpyController
+            if (controller != null) {
+                val state = controller.screenState.value
+                if (state !is ScreenState.Streaming && state !is ScreenState.Connecting) {
+                    controller.startMirroring()
+                    _actionMessage.value = "已启动投屏"
+                } else {
+                    controller.triggerRemoteScreenRefresh()
+                }
+            }
+        } else {
+            autoStartMirrorOnConnect = true
+            connectLatestDevice()
+        }
+    }
+
+    init {
+        viewModelScope.launch {
+            _connectionState.collect { state ->
+                when (state) {
+                    is ConnectionState.Connected -> {
+                        val session = currentSession
+                        WidgetStateHolder.onConnected(session, state.deviceName, state.ip, _sessions.value.size)
+                        if (autoStartMirrorOnConnect) {
+                            autoStartMirrorOnConnect = false
+                            triggerMirrorFromWidget()
+                        }
+                    }
+                    is ConnectionState.Connecting -> {
+                        WidgetStateHolder.onConnecting()
+                    }
+                    is ConnectionState.Disconnected, is ConnectionState.Error -> {
+                        WidgetStateHolder.onDisconnected()
+                        autoStartMirrorOnConnect = false
+                    }
+                }
+                WidgetUpdateHelper.updateAllWidgets(getApplication())
+            }
+        }
+
+        viewModelScope.launch {
+            _sessions.collect { sessionList ->
+                val active = currentSession
+                if (active != null) {
+                    WidgetStateHolder.onConnected(active, active.deviceName, "${active.ip}:${active.port}", sessionList.size)
+                } else if (sessionList.isNotEmpty()) {
+                    val first = sessionList.first()
+                    WidgetStateHolder.onConnected(first, first.deviceName, "${first.ip}:${first.port}", sessionList.size)
+                } else if (_connectionState.value !is ConnectionState.Connecting) {
+                    WidgetStateHolder.onDisconnected()
+                }
+                WidgetUpdateHelper.updateAllWidgets(getApplication())
+            }
+        }
+
+        viewModelScope.launch {
+            savedDevices.collect {
+                WidgetUpdateHelper.updateAllWidgets(getApplication())
+            }
+        }
+
+        startBackgroundMirroringWatcher()
     }
 
     /**
@@ -584,6 +930,12 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _deviceDensity = MutableStateFlow(DeviceDensityInfo())
     val deviceDensity: StateFlow<DeviceDensityInfo> = _deviceDensity.asStateFlow()
+
+    private val _deviceQuickSettings = MutableStateFlow(DeviceQuickSettingsState())
+    val deviceQuickSettings: StateFlow<DeviceQuickSettingsState> = _deviceQuickSettings.asStateFlow()
+
+    private val _mediaPlaybackInfo = MutableStateFlow(MediaPlaybackInfo())
+    val mediaPlaybackInfo: StateFlow<MediaPlaybackInfo> = _mediaPlaybackInfo.asStateFlow()
 
     private val _isRefreshingSystemInfo = MutableStateFlow(false)
     val isRefreshingSystemInfo: StateFlow<Boolean> = _isRefreshingSystemInfo.asStateFlow()
@@ -773,6 +1125,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         _isRefreshingSystemInfo.value = false
         _systemInfo.value = SystemInfo()
         _deviceDensity.value = DeviceDensityInfo()
+        _deviceQuickSettings.value = DeviceQuickSettingsState()
+        _mediaPlaybackInfo.value = MediaPlaybackInfo()
         _installedApps.value = emptyList()
         _isAppLoading.value = false
         _appLoadingProgress.value = 0f
@@ -786,6 +1140,211 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         _currentInstallTask.value = null
         _currentDownloadTask.value = null
         resetUiPageStates()
+    }
+
+    /**
+     * 保存当前活跃会话的终端输出、路径、文件、系统信息与应用等现场状态
+     */
+    fun saveCurrentSessionState() {
+        val currentId = _currentSessionId.value ?: return
+        val current = _sessions.value.firstOrNull { it.id == currentId } ?: return
+        current.terminalOutput = _terminalOutput.value
+        current.terminalPath = _terminalPath.value
+        current.isRootMode = _isRootMode.value
+        current.currentRemotePath = _currentRemotePath.value
+        current.remoteFiles = _remoteFiles.value
+        current.systemInfo = _systemInfo.value
+        current.deviceDensity = _deviceDensity.value
+        current.quickSettings = _deviceQuickSettings.value
+        current.mediaPlaybackInfo = _mediaPlaybackInfo.value
+        current.cachedStaticInfo = cachedStaticInfo
+        current.installedApps = _installedApps.value
+        current.appDiagnosisLogs = _appDiagnosisLogs.value
+        current.runningProcesses = _runningProcesses.value
+    }
+
+    /**
+     * 将指定会话的数据状态加载恢复至 ViewModel 中，使全局 UI 响应当前会话
+     */
+    fun applySessionToViewModel(session: AdbDeviceSession) {
+        _currentSessionId.value = session.id
+        activeConnection = session.connection
+        scrcpyController = session.scrcpyController
+
+        _terminalOutput.value = session.terminalOutput
+        _terminalPath.value = session.terminalPath
+        _isRootMode.value = session.isRootMode
+        _currentRemotePath.value = session.currentRemotePath
+        _remoteFiles.value = session.remoteFiles
+        _systemInfo.value = session.systemInfo
+        _deviceDensity.value = session.deviceDensity
+        _deviceQuickSettings.value = session.quickSettings
+        _mediaPlaybackInfo.value = session.mediaPlaybackInfo
+        cachedStaticInfo = session.cachedStaticInfo
+        _installedApps.value = session.installedApps
+        _appDiagnosisLogs.value = session.appDiagnosisLogs
+        _runningProcesses.value = session.runningProcesses
+
+        lastConnectedIp = session.ip
+        lastConnectedPort = session.port
+        lastConnectedDeviceName = session.deviceName
+
+        _connectionState.value = ConnectionState.Connected(session.ip, session.deviceName)
+        com.yangyx.adbhelper.service.AdbSessionService.startService(
+            getApplication(),
+            session.deviceName,
+            session.ip
+        )
+        WidgetStateHolder.onConnected(session, session.deviceName, "${session.ip}:${session.port}", _sessions.value.size)
+        WidgetUpdateHelper.updateAllWidgets(getApplication())
+    }
+
+    /**
+     * 快速切换当前活跃会话（无缝切换，不影响其他会话的投屏或后台执行状态）
+     */
+    fun switchSession(sessionId: String, saveCurrentIndex: Int? = null) {
+        val targetSession = _sessions.value.firstOrNull { it.id == sessionId } ?: return
+        val currentId = _currentSessionId.value
+        if (currentId == sessionId) {
+            if (saveCurrentIndex != null) {
+                targetSession.selectedNavIndex = saveCurrentIndex
+            }
+            return
+        }
+
+        // 保存切出前会话的现场
+        if (currentId != null) {
+            val prev = _sessions.value.firstOrNull { it.id == currentId }
+            if (prev != null) {
+                saveCurrentSessionState()
+                if (saveCurrentIndex != null) {
+                    prev.selectedNavIndex = saveCurrentIndex
+                }
+                // 检查切出前会话是否正处于投屏状态，若在投屏则记录后台时间戳并标记切回恢复
+                val isStreaming = prev.scrcpyController.screenState.value is ScreenState.Streaming ||
+                        prev.scrcpyController.screenState.value is ScreenState.Connecting
+                if (isStreaming) {
+                    prev.backgroundTimestamp = System.currentTimeMillis()
+                    prev.autoResumeMirroringOnSwitch = true
+                } else {
+                    prev.backgroundTimestamp = 0L
+                    prev.autoResumeMirroringOnSwitch = false
+                }
+            }
+        }
+
+        applySessionToViewModel(targetSession)
+        targetSession.backgroundTimestamp = 0L
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val dev = repository.getDeviceByIpAndPort(targetSession.ip, targetSession.port)
+                if (dev != null) {
+                    repository.saveDevice(dev.copy(lastConnectedTime = System.currentTimeMillis()))
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 如果切回的目标会话此前处于投屏状态（或超时暂停状态），切回后自动恢复重新连接投屏
+        val shouldAutoResume = targetSession.autoResumeMirroringOnSwitch
+        targetSession.autoResumeMirroringOnSwitch = false
+
+        if (shouldAutoResume && targetSession.scrcpyController.screenState.value !is ScreenState.Streaming &&
+            targetSession.scrcpyController.screenState.value !is ScreenState.Connecting) {
+            targetSession.scrcpyController.startMirroring()
+            _actionMessage.value = "已切换至会话: ${targetSession.deviceName} (已自动恢复投屏)"
+        } else {
+            _actionMessage.value = "已切换至会话: ${targetSession.deviceName}"
+        }
+
+        // 唤醒并触发远程目标设备屏幕刷新，确保切回时画面立刻实时呈现
+        targetSession.scrcpyController.triggerRemoteScreenRefresh()
+    }
+
+    /**
+     * 注册并激活新的设备会话
+     */
+    fun registerAndActivateSession(session: AdbDeviceSession) {
+        val currentId = _currentSessionId.value
+        if (currentId != null && currentId != session.id) {
+            val prev = _sessions.value.firstOrNull { it.id == currentId }
+            if (prev != null) {
+                val isStreaming = prev.scrcpyController.screenState.value is ScreenState.Streaming ||
+                        prev.scrcpyController.screenState.value is ScreenState.Connecting
+                if (isStreaming) {
+                    prev.backgroundTimestamp = System.currentTimeMillis()
+                    prev.autoResumeMirroringOnSwitch = true
+                } else {
+                    prev.backgroundTimestamp = 0L
+                    prev.autoResumeMirroringOnSwitch = false
+                }
+            }
+        }
+        saveCurrentSessionState()
+        val list = _sessions.value.toMutableList()
+        val existingIdx = list.indexOfFirst { it.id == session.id || (it.ip == session.ip && it.port == session.port && session.ip != "USB OTG") }
+        if (existingIdx >= 0) {
+            list[existingIdx] = session
+        } else {
+            list.add(0, session)
+        }
+        _sessions.value = list
+        session.backgroundTimestamp = 0L
+        applySessionToViewModel(session)
+    }
+
+    /**
+     * 终止指定设备会话。如果是当前正在使用的会话，断开后自动切换至剩余列表中最上面的一台设备；若无剩余会话则返回首页。
+     */
+    fun terminateSession(sessionId: String) {
+        val target = _sessions.value.firstOrNull { it.id == sessionId } ?: return
+        try {
+            target.scrcpyController.stopMirroring()
+        } catch (_: Exception) {}
+        try {
+            target.connection.disconnect()
+        } catch (_: Exception) {}
+
+        val remaining = _sessions.value.filter { it.id != sessionId }
+        _sessions.value = remaining
+
+        if (_currentSessionId.value == sessionId) {
+            if (remaining.isNotEmpty()) {
+                val next = remaining.first()
+                applySessionToViewModel(next)
+                next.backgroundTimestamp = 0L
+                if (next.autoResumeMirroringOnSwitch &&
+                    next.scrcpyController.screenState.value !is ScreenState.Streaming &&
+                    next.scrcpyController.screenState.value !is ScreenState.Connecting) {
+                    next.autoResumeMirroringOnSwitch = false
+                    next.scrcpyController.startMirroring()
+                }
+                next.scrcpyController.triggerRemoteScreenRefresh()
+                _actionMessage.value = "已断开【${target.deviceName}】，已切换至【${next.deviceName}】"
+            } else {
+                _currentSessionId.value = null
+                activeConnection = null
+                scrcpyController = null
+                _connectionState.value = ConnectionState.Disconnected
+                com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+                resetDeviceSessionStates("", "未连接")
+                _actionMessage.value = "已断开连接并终止所有会话"
+            }
+        } else {
+            _actionMessage.value = "已终止会话【${target.deviceName}】"
+        }
+    }
+
+    /**
+     * 断开当前正在连接的会话
+     */
+    fun disconnectCurrentSession() {
+        val currentId = _currentSessionId.value
+        if (currentId != null) {
+            terminateSession(currentId)
+        } else {
+            disconnect()
+        }
     }
 
     private suspend fun isPortReachable(ip: String, port: Int, timeoutMs: Int = 1000): Boolean = kotlinx.coroutines.withContext(Dispatchers.IO) {
@@ -818,6 +1377,20 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             ?: groupDevices.firstOrNull { it.iconType.isNotBlank() }?.iconType
             ?: "phone"
 
+        val isManual = isGroupManuallyOrdered(
+            groupKey = if (serialNo.isNotBlank()) "serial_$serialNo" else "",
+            serialNo = serialNo.ifBlank { existing?.serialNo ?: "" },
+            ipRecords = if (existing != null) listOf(existing) else emptyList()
+        )
+
+        val targetSortOrder = if (isManual) {
+            // 手工调整过顺序的记录，连接后位置保持不动
+            existing?.sortOrder ?: ((groupDevices.maxOfOrNull { it.sortOrder } ?: 0) + 1)
+        } else {
+            // 未手工调整过的记录，按照原逻辑自动置顶
+            minGroupSortOrder - 1
+        }
+
         val deviceToSave = if (existing != null) {
             existing.copy(
                 serialNo = if (serialNo.isNotEmpty()) serialNo else existing.serialNo,
@@ -826,7 +1399,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 aliasName = existingAlias,
                 iconType = existingIcon,
                 lastConnectedTime = System.currentTimeMillis(),
-                sortOrder = minGroupSortOrder - 1
+                sortOrder = targetSortOrder
             )
         } else {
             DeviceEntity(
@@ -838,7 +1411,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 aliasName = existingAlias,
                 iconType = existingIcon,
                 lastConnectedTime = System.currentTimeMillis(),
-                sortOrder = minGroupSortOrder - 1
+                sortOrder = targetSortOrder
             )
         }
         repository.saveDevice(deviceToSave)
@@ -850,6 +1423,16 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             val primaryId = group.ipRecords.firstOrNull()?.id ?: 0L
             val trimmedAlias = aliasName.trim()
             repository.updateDeviceAliasAndIcon(group.serialNo, primaryId, trimmedAlias, iconType)
+
+            val updatedSessions = _sessions.value.map { session ->
+                val matches = group.ipRecords.any { it.ipAddress == session.ip } ||
+                        (group.serialNo.isNotBlank() && session.serialNo == group.serialNo)
+                if (matches) {
+                    val newTitle = if (trimmedAlias.isNotBlank()) trimmedAlias else group.deviceName
+                    session.copy(deviceName = newTitle, iconType = iconType)
+                } else session
+            }
+            _sessions.value = updatedSessions
 
             // 如果当前正处于已连接状态，且当前连接属于该设备，同步将标题与前台服务名称更新为重命名后的名字
             val currentState = _connectionState.value
@@ -868,6 +1451,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     // Connect to target IP & Port with concurrency conflict avoidance and state cleanup
     fun connectToDevice(ip: String, port: Int = 5555, targetAlias: String? = null) {
+        val existingSession = _sessions.value.firstOrNull { it.ip == ip && it.port == port && it.connection.isConnected }
+        if (existingSession != null) {
+            switchSession(existingSession.id)
+            _actionMessage.value = "已切换至该设备的现有会话: ${existingSession.deviceName}"
+            return
+        }
+
         cancelPreviousConnectTask()
         val thisConnectId = ++currentConnectId
 
@@ -889,15 +1479,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                activeConnection?.disconnect()
-                activeConnection = conn
                 pendingAttemptConnection = null
-                scrcpyController = ScrcpyController(conn, viewModelScope, getApplication())
-                lastConnectedIp = ip
-                lastConnectedPort = port
-
-                // 重置上一台设备的终端输出、文件、进程、应用等数据
-                resetDeviceSessionStates(ip, "正在获取设备信息...")
+                val newController = ScrcpyController(conn, viewModelScope, getApplication())
 
                 // Fetch serial number and device info
                 val rawSerial = conn.executeShell("getprop ro.serialno").trim()
@@ -938,11 +1521,21 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     else -> deviceName
                 }
 
-                lastConnectedDeviceName = finalTitle
-                _terminalOutput.value = "=== ADB Helper 终端 ===\n已连接设备: $finalTitle ($ip:$port)\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+                val initialTerminal = "=== ADB Helper 终端 ===\n已连接设备: $finalTitle ($ip:$port)\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+                val newSession = AdbDeviceSession(
+                    ip = ip,
+                    port = port,
+                    deviceName = finalTitle,
+                    serialNo = serialNo,
+                    model = if (marketName.isNotEmpty()) "$marketName ($model)" else model,
+                    connection = conn,
+                    scrcpyController = newController,
+                    terminalOutput = initialTerminal
+                )
 
-                _connectionState.value = ConnectionState.Connected(ip, finalTitle)
-                com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), finalTitle, ip)
+                withContext(Dispatchers.Main) {
+                    registerAndActivateSession(newSession)
+                }
 
                 // Initialize default data
                 refreshFiles()
@@ -965,6 +1558,16 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     // Connect to device trying all saved IPs sequentially (with 1s port test timeout & cancellation guard)
     fun connectDeviceSequentially(group: GroupedDevice) {
         if (group.ipRecords.isEmpty()) return
+
+        val existing = _sessions.value.firstOrNull { session ->
+            group.ipRecords.any { it.ipAddress == session.ip && it.port == session.port } && session.connection.isConnected
+        }
+        if (existing != null) {
+            switchSession(existing.id)
+            _actionMessage.value = "已切换至该设备的现有会话: ${existing.deviceName}"
+            return
+        }
+
         cancelPreviousConnectTask()
         val thisConnectId = ++currentConnectId
 
@@ -1009,14 +1612,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         return@launch
                     }
 
-                    activeConnection?.disconnect()
-                    activeConnection = conn
                     pendingAttemptConnection = null
-                    scrcpyController = ScrcpyController(conn, viewModelScope, getApplication())
-                    lastConnectedIp = item.ipAddress
-                    lastConnectedPort = item.port
-
-                    resetDeviceSessionStates(item.ipAddress, "正在获取设备信息...")
+                    val newController = ScrcpyController(conn, viewModelScope, getApplication())
 
                     val rawSerial = conn.executeShell("getprop ro.serialno").trim()
                     val serialNo = if (rawSerial.isNotEmpty() && rawSerial != "unknown") rawSerial else {
@@ -1050,11 +1647,22 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         else -> devName
                     }
 
-                    lastConnectedDeviceName = finalDisplayName
-                    _terminalOutput.value = "=== ADB Helper 终端 ===\n已连接设备: $finalDisplayName (${item.ipAddress}:${item.port})\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+                    val initialTerminal = "=== ADB Helper 终端 ===\n已连接设备: $finalDisplayName (${item.ipAddress}:${item.port})\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+                    val newSession = AdbDeviceSession(
+                        ip = item.ipAddress,
+                        port = item.port,
+                        deviceName = finalDisplayName,
+                        serialNo = serialNo,
+                        model = if (marketName.isNotEmpty()) "$marketName ($model)" else model,
+                        iconType = group.iconType,
+                        connection = conn,
+                        scrcpyController = newController,
+                        terminalOutput = initialTerminal
+                    )
 
-                    _connectionState.value = ConnectionState.Connected(item.ipAddress, finalDisplayName)
-                    com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), finalDisplayName, item.ipAddress)
+                    withContext(Dispatchers.Main) {
+                        registerAndActivateSession(newSession)
+                    }
 
                     refreshFiles()
                     refreshSystemInfo()
@@ -1091,11 +1699,41 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             val moved = list.removeAt(fromIndex)
             list.add(toIndex, moved)
 
-            val baseOrder = group.ipRecords.minOfOrNull { it.sortOrder } ?: 0
+            // 标记该设备分组已被用户手工调整过顺序
+            markGroupManuallyOrdered(group)
+
+            // 重新按调整后的顺序索引 (0, 1, 2, ...) 赋予 sortOrder
             val updated = list.mapIndexed { idx, entity ->
-                entity.copy(sortOrder = baseOrder + idx)
+                entity.copy(sortOrder = idx)
             }
             repository.updateDevices(updated)
+        }
+    }
+
+    fun unlockGroupManualOrder(group: GroupedDevice) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val editor = devicePrefs.edit()
+            if (group.serialNo.isNotBlank()) {
+                editor.remove("manual_order_serial_${group.serialNo}")
+                editor.remove("manual_order_group_serial_${group.serialNo}")
+            }
+            if (group.key.isNotBlank()) {
+                editor.remove("manual_order_group_${group.key}")
+            }
+            group.ipRecords.forEach { record ->
+                if (record.id != 0L) {
+                    editor.remove("manual_order_id_${record.id}")
+                }
+                editor.remove("manual_order_ip_${record.ipAddress}_${record.port}")
+            }
+            editor.apply()
+
+            // 重置为默认顺序 0，恢复按最近连接时间自动排序的逻辑
+            val updated = group.ipRecords.map { entity ->
+                entity.copy(sortOrder = 0)
+            }
+            repository.updateDevices(updated)
+            _actionMessage.value = "已解除固定排序，恢复按最近连接自动排序"
         }
     }
 
@@ -1111,6 +1749,21 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteGroupDevice(group: GroupedDevice) {
         viewModelScope.launch(Dispatchers.IO) {
+            val editor = devicePrefs.edit()
+            if (group.serialNo.isNotBlank()) {
+                editor.remove("manual_order_serial_${group.serialNo}")
+            }
+            if (group.key.isNotBlank()) {
+                editor.remove("manual_order_group_${group.key}")
+            }
+            group.ipRecords.forEach { record ->
+                if (record.id != 0L) {
+                    editor.remove("manual_order_id_${record.id}")
+                }
+                editor.remove("manual_order_ip_${record.ipAddress}_${record.port}")
+            }
+            editor.apply()
+
             if (group.serialNo.isNotBlank()) {
                 repository.deleteDevicesBySerialNo(group.serialNo)
             }
@@ -1143,12 +1796,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                activeConnection?.disconnect()
-                activeConnection = conn
                 pendingAttemptConnection = null
-                scrcpyController = com.yangyx.adbhelper.scrcpy.ScrcpyController(conn, viewModelScope, getApplication())
-
-                resetDeviceSessionStates("USB OTG", "USB 设备")
+                val newController = com.yangyx.adbhelper.scrcpy.ScrcpyController(conn, viewModelScope, getApplication())
 
                 val marketName = conn.executeShell("getprop ro.product.marketname").trim()
                 val model = conn.executeShell("getprop ro.product.model").trim()
@@ -1164,10 +1813,20 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                _terminalOutput.value = "=== ADB Helper 终端 ===\n已连接 USB 设备: $deviceName\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+                val initialTerminal = "=== ADB Helper 终端 ===\n已连接 USB 设备: $deviceName\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+                val newSession = AdbDeviceSession(
+                    ip = "USB OTG 设备",
+                    port = 0,
+                    deviceName = deviceName,
+                    connection = conn,
+                    scrcpyController = newController,
+                    terminalOutput = initialTerminal
+                )
 
-                _connectionState.value = ConnectionState.Connected("USB OTG 设备", deviceName)
-                com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), deviceName, "USB OTG")
+                withContext(Dispatchers.Main) {
+                    registerAndActivateSession(newSession)
+                }
+
                 refreshFiles()
                 refreshSystemInfo()
                 refreshProcesses()
@@ -1182,8 +1841,32 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        val currentId = _currentSessionId.value
+        if (currentId != null) {
+            terminateSession(currentId)
+        } else {
+            cancelPreviousConnectTask()
+            currentConnectId++
+            com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+            scrcpyController?.stopMirroring()
+            scrcpyController = null
+            virtualMouseManager.disconnect()
+            activeConnection?.disconnect()
+            activeConnection = null
+            _connectionState.value = ConnectionState.Disconnected
+            resetDeviceSessionStates("", "未连接")
+        }
+    }
+
+    fun disconnectAll() {
         cancelPreviousConnectTask()
         currentConnectId++
+        _sessions.value.forEach { session ->
+            try { session.scrcpyController.stopMirroring() } catch (_: Exception) {}
+            try { session.connection.disconnect() } catch (_: Exception) {}
+        }
+        _sessions.value = emptyList()
+        _currentSessionId.value = null
         com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
         scrcpyController?.stopMirroring()
         scrcpyController = null
@@ -1298,6 +1981,622 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             }
             fetchDeviceDensity()
         }
+    }
+
+    /**
+     * 获取设备常用系统设置开关状态 (蓝牙、Wi-Fi、静音、勿扰、定位、NFC、旋转、亮度、移动数据等)
+     */
+    fun fetchQuickSettings() {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isLoading = true)
+            try {
+                val batchCmd = "echo \"bt:\$(settings get global bluetooth_on 2>/dev/null)\"; " +
+                        "echo \"wifi:\$(settings get global wifi_on 2>/dev/null)\"; " +
+                        "echo \"ringer:\$(settings get global mode_ringer 2>/dev/null)\"; " +
+                        "echo \"zen:\$(settings get global zen_mode 2>/dev/null)\"; " +
+                        "echo \"loc:\$(settings get secure location_mode 2>/dev/null)\"; " +
+                        "echo \"nfc_chk:\$(service check nfc 2>/dev/null)\"; " +
+                        "echo \"nfc_dump:\$(dumpsys nfc 2>/dev/null | grep -m 1 -iE 'mState=|mIsNfcEnabled=|enabled:' | tr -d '\\r')\"; " +
+                        "echo \"nfc_sec:\$(settings get secure nfc_on 2>/dev/null)\"; " +
+                        "echo \"nfc_glob:\$(settings get global nfc_on 2>/dev/null)\"; " +
+                        "echo \"rot:\$(settings get system accelerometer_rotation 2>/dev/null)\"; " +
+                        "echo \"bright:\$(settings get system screen_brightness 2>/dev/null)\"; " +
+                        "echo \"auto_bright:\$(settings get system screen_brightness_mode 2>/dev/null)\"; " +
+                        "echo \"data_cmd:\$(cmd phone data is-enabled 2>/dev/null)\"; " +
+                        "echo \"data_list:\$(settings list global 2>/dev/null | grep -E '^mobile_data' | tr -d '\\r')\"; " +
+                        "echo \"data_glob:\$(settings get global mobile_data 2>/dev/null)\"; " +
+                        "echo \"data_sub1:\$(settings get global mobile_data1 2>/dev/null)\"; " +
+                        "echo \"data_sub0:\$(settings get global mobile_data0 2>/dev/null)\"; " +
+                        "echo \"data_reg:\$(dumpsys telephony.registry 2>/dev/null | grep -m 1 -i 'mDataConnectionState=' | tr -d '\\r')\""
+
+                val output = conn.executeShell(batchCmd)
+                var isBt = _deviceQuickSettings.value.isBluetoothOn
+                var isWifi = _deviceQuickSettings.value.isWifiOn
+                var ringer = _deviceQuickSettings.value.ringerMode
+                var zen = _deviceQuickSettings.value.zenMode
+                var isLoc = _deviceQuickSettings.value.isLocationOn
+                var isNfc = _deviceQuickSettings.value.isNfcOn
+                var hasNfc = _deviceQuickSettings.value.hasNfc
+                var isRot = _deviceQuickSettings.value.isAutoRotateOn
+                var bright = _deviceQuickSettings.value.brightness
+                var isAutoBright = _deviceQuickSettings.value.isAutoBrightnessOn
+                var isData = _deviceQuickSettings.value.isMobileDataOn
+
+                var nfcCheck = ""
+                var nfcDump = ""
+                var nfcSec = ""
+                var nfcGlob = ""
+
+                var dataCmd = ""
+                val dataListLines = mutableListOf<String>()
+                var dataGlob = ""
+                var dataSub1 = ""
+                var dataSub0 = ""
+                var dataReg = ""
+
+                output.lines().forEach { rawLine ->
+                    val line = rawLine.trim()
+                    when {
+                        line.startsWith("bt:") -> {
+                            val v = line.removePrefix("bt:").trim()
+                            if (v == "1") isBt = true else if (v == "0") isBt = false
+                        }
+                        line.startsWith("wifi:") -> {
+                            val v = line.removePrefix("wifi:").trim()
+                            if (v == "1") isWifi = true else if (v == "0") isWifi = false
+                        }
+                        line.startsWith("ringer:") -> {
+                            line.removePrefix("ringer:").trim().toIntOrNull()?.let { ringer = it }
+                        }
+                        line.startsWith("zen:") -> {
+                            line.removePrefix("zen:").trim().toIntOrNull()?.let { zen = it }
+                        }
+                        line.startsWith("loc:") -> {
+                            val v = line.removePrefix("loc:").trim().toIntOrNull() ?: 0
+                            isLoc = v > 0
+                        }
+                        line.startsWith("nfc_chk:") -> {
+                            nfcCheck = line.removePrefix("nfc_chk:").trim()
+                        }
+                        line.startsWith("nfc_dump:") -> {
+                            nfcDump = line.removePrefix("nfc_dump:").trim().lowercase()
+                        }
+                        line.startsWith("nfc_sec:") -> {
+                            nfcSec = line.removePrefix("nfc_sec:").trim()
+                        }
+                        line.startsWith("nfc_glob:") -> {
+                            nfcGlob = line.removePrefix("nfc_glob:").trim()
+                        }
+                        line.startsWith("rot:") -> {
+                            val v = line.removePrefix("rot:").trim()
+                            if (v == "1") isRot = true else if (v == "0") isRot = false
+                        }
+                        line.startsWith("bright:") -> {
+                            line.removePrefix("bright:").trim().toIntOrNull()?.let {
+                                bright = it.coerceIn(1, 255)
+                            }
+                        }
+                        line.startsWith("auto_bright:") -> {
+                            val v = line.removePrefix("auto_bright:").trim()
+                            if (v == "1") isAutoBright = true else if (v == "0") isAutoBright = false
+                        }
+                        line.startsWith("data_cmd:") -> {
+                            dataCmd = line.removePrefix("data_cmd:").trim().lowercase()
+                        }
+                        line.startsWith("data_list:") -> {
+                            val rest = line.removePrefix("data_list:").trim()
+                            if (rest.isNotEmpty()) dataListLines.add(rest)
+                        }
+                        line.startsWith("mobile_data") -> {
+                            dataListLines.add(line.trim())
+                        }
+                        line.startsWith("data_glob:") -> {
+                            dataGlob = line.removePrefix("data_glob:").trim()
+                        }
+                        line.startsWith("data_sub1:") -> {
+                            dataSub1 = line.removePrefix("data_sub1:").trim()
+                        }
+                        line.startsWith("data_sub0:") -> {
+                            dataSub0 = line.removePrefix("data_sub0:").trim()
+                        }
+                        line.startsWith("data_reg:") -> {
+                            dataReg = line.removePrefix("data_reg:").trim()
+                        }
+                    }
+                }
+
+                // NFC 状态综合仲裁
+                val nfcServiceFound = nfcCheck.contains("found", ignoreCase = true)
+                val nfcDumpAvailable = nfcDump.isNotBlank() && !nfcDump.contains("not find service", ignoreCase = true)
+                val nfcSettingAvailable = (nfcSec == "0" || nfcSec == "1") || (nfcGlob == "0" || nfcGlob == "1")
+                if (nfcServiceFound || nfcDumpAvailable || nfcSettingAvailable) {
+                    hasNfc = true
+                    if (nfcDump.contains("mstate=on") || nfcDump.contains("mstate=state_on") ||
+                        nfcDump.contains("mstate=3") || nfcDump.contains("mstate=turning_on") ||
+                        nfcDump.contains("misnfcenabled=true") || nfcDump.contains("enabled: true")) {
+                        isNfc = true
+                    } else if (nfcDump.contains("mstate=off") || nfcDump.contains("mstate=state_off") ||
+                        nfcDump.contains("mstate=1") || nfcDump.contains("mstate=turning_off") ||
+                        nfcDump.contains("misnfcenabled=false") || nfcDump.contains("enabled: false")) {
+                        isNfc = false
+                    } else if (nfcSec == "1" || nfcGlob == "1") {
+                        isNfc = true
+                    } else if (nfcSec == "0" || nfcGlob == "0") {
+                        isNfc = false
+                    }
+                } else if (nfcCheck.contains("not found", ignoreCase = true)) {
+                    hasNfc = false
+                    isNfc = false
+                }
+
+                // 移动数据状态综合仲裁 (支持单卡、多卡、不同芯片方案)
+                val anyDataListEnabled = dataListLines.any { it.endsWith("=1") }
+                val isDataSubEnabled = dataSub1 == "1" || dataSub0 == "1" || dataGlob == "1"
+                val isDataConnected = dataReg.contains("mDataConnectionState=2") || dataReg.contains("DATA_CONNECTED", ignoreCase = true)
+                val isCmdEnabled = dataCmd == "true" || dataCmd == "enabled" || dataCmd == "1"
+                val isCmdDisabled = dataCmd == "false" || dataCmd == "disabled" || dataCmd == "0"
+
+                if (isCmdEnabled || anyDataListEnabled || isDataSubEnabled || isDataConnected) {
+                    isData = true
+                } else if (isCmdDisabled || (dataGlob == "0" && (dataSub1.isEmpty() || dataSub1 == "0") && (dataSub0.isEmpty() || dataSub0 == "0") && dataListLines.all { it.endsWith("=0") })) {
+                    isData = false
+                }
+
+                _deviceQuickSettings.value = DeviceQuickSettingsState(
+                    isBluetoothOn = isBt,
+                    isWifiOn = isWifi,
+                    ringerMode = ringer,
+                    isZenModeOn = zen > 0,
+                    zenMode = zen,
+                    isLocationOn = isLoc,
+                    isNfcOn = isNfc,
+                    hasNfc = hasNfc,
+                    isAutoRotateOn = isRot,
+                    brightness = bright,
+                    isAutoBrightnessOn = isAutoBright,
+                    isMobileDataOn = isData,
+                    isLoading = false
+                )
+            } catch (_: Exception) {
+                _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isLoading = false)
+            }
+        }
+    }
+
+    fun toggleBluetooth() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isBluetoothOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isBluetoothOn = target)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cmd = if (target) "svc bluetooth enable" else "svc bluetooth disable"
+                conn.executeShell(cmd)
+                _actionMessage.value = if (target) "已开启蓝牙" else "已关闭蓝牙"
+                kotlinx.coroutines.delay(600)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换蓝牙失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun toggleWifi() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isWifiOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isWifiOn = target)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cmd = if (target) "svc wifi enable" else "svc wifi disable"
+                conn.executeShell(cmd)
+                _actionMessage.value = if (target) "已开启 Wi-Fi" else "已关闭 Wi-Fi"
+                kotlinx.coroutines.delay(600)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换 Wi-Fi 失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun toggleMute() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val currentMute = _deviceQuickSettings.value.isMuteOn
+        val targetRinger = if (currentMute) 2 else 0 // 2: normal, 0: silent
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(ringerMode = targetRinger)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("cmd audio set-ringer-mode $targetRinger 2>/dev/null; settings put global mode_ringer $targetRinger")
+                _actionMessage.value = if (!currentMute) "已开启静音模式" else "已恢复正常响铃"
+                kotlinx.coroutines.delay(300)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换静音失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun toggleZenMode() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val currentZen = _deviceQuickSettings.value.isZenModeOn
+        val targetZen = if (currentZen) 0 else 1
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isZenModeOn = !currentZen, zenMode = targetZen)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (targetZen == 0) {
+                    conn.executeShell("settings put global zen_mode 0; cmd notification set_dnd off 2>/dev/null")
+                    _actionMessage.value = "已关闭勿扰模式"
+                } else {
+                    conn.executeShell("settings put global zen_mode 1; cmd notification set_dnd priority 2>/dev/null")
+                    _actionMessage.value = "已开启勿扰模式"
+                }
+                kotlinx.coroutines.delay(300)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换勿扰模式失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun toggleLocation() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isLocationOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isLocationOn = target)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (target) {
+                    conn.executeShell("cmd location set-location-enabled true 2>/dev/null; settings put secure location_mode 3 2>/dev/null")
+                    _actionMessage.value = "已开启定位服务"
+                } else {
+                    conn.executeShell("cmd location set-location-enabled false 2>/dev/null; settings put secure location_mode 0 2>/dev/null")
+                    _actionMessage.value = "已关闭定位服务"
+                }
+                kotlinx.coroutines.delay(400)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换定位服务失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun toggleNfc() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isNfcOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isNfcOn = target, hasNfc = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cmd = if (target) {
+                    "svc nfc enable 2>/dev/null || cmd nfc enable 2>/dev/null"
+                } else {
+                    "svc nfc disable 2>/dev/null || cmd nfc disable 2>/dev/null"
+                }
+                conn.executeShell(cmd)
+                _actionMessage.value = if (target) "已开启 NFC" else "已关闭 NFC"
+                delay(600)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换 NFC 失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun toggleAutoRotate() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isAutoRotateOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isAutoRotateOn = target)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val value = if (target) "1" else "0"
+                conn.executeShell("settings put system accelerometer_rotation $value")
+                _actionMessage.value = if (target) "已开启自动旋转屏幕" else "已锁定竖屏"
+                kotlinx.coroutines.delay(300)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换屏幕旋转失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun setScreenBrightness(brightness: Int) {
+        val conn = activeConnection ?: return
+        val clamped = brightness.coerceIn(1, 255)
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(brightness = clamped)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("settings put system screen_brightness $clamped")
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun setScreenBrightnessPercent(percent: Int) {
+        val raw = com.yangyx.adbhelper.ui.models.BrightnessConverter.percentToRawBrightness(percent.toFloat())
+        setScreenBrightness(raw)
+    }
+
+    fun toggleAutoBrightness() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isAutoBrightnessOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isAutoBrightnessOn = target)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val value = if (target) "1" else "0"
+                conn.executeShell("settings put system screen_brightness_mode $value")
+                _actionMessage.value = if (target) "已开启自动亮度" else "已转为手动亮度"
+                kotlinx.coroutines.delay(300)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换自动亮度失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    fun toggleMobileData() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isMobileDataOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isMobileDataOn = target)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cmd = if (target) {
+                    "svc data enable 2>/dev/null; cmd phone data enable 2>/dev/null; settings put global mobile_data 1 2>/dev/null; settings put global mobile_data1 1 2>/dev/null"
+                } else {
+                    "svc data disable 2>/dev/null; cmd phone data disable 2>/dev/null; settings put global mobile_data 0 2>/dev/null; settings put global mobile_data1 0 2>/dev/null"
+                }
+                conn.executeShell(cmd)
+                _actionMessage.value = if (target) "已开启移动数据" else "已关闭移动数据"
+                delay(600)
+            } catch (e: Exception) {
+                _actionMessage.value = "切换移动数据失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    /**
+     * 获取对端设备当前正在播放的媒体信息 (歌曲标题、艺术家、专辑、播放器应用名、播放状态、进度)
+     */
+    fun fetchMediaPlaybackInfo() {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            _mediaPlaybackInfo.value = _mediaPlaybackInfo.value.copy(isLoading = true)
+            try {
+                val output = conn.executeShell("dumpsys media_session 2>/dev/null")
+                val parsed = parseMediaSessionOutput(output)
+                _mediaPlaybackInfo.value = parsed.copy(isLoading = false)
+            } catch (_: Exception) {
+                _mediaPlaybackInfo.value = _mediaPlaybackInfo.value.copy(isLoading = false)
+            }
+        }
+    }
+
+    fun mediaPlayPause() {
+        sendInputKeyEvent(85, "播放/暂停")
+        viewModelScope.launch(Dispatchers.IO) {
+            delay(400)
+            fetchMediaPlaybackInfo()
+        }
+    }
+
+    fun mediaNext() {
+        sendInputKeyEvent(87, "下一曲")
+        viewModelScope.launch(Dispatchers.IO) {
+            delay(400)
+            fetchMediaPlaybackInfo()
+        }
+    }
+
+    fun mediaPrevious() {
+        sendInputKeyEvent(88, "上一曲")
+        viewModelScope.launch(Dispatchers.IO) {
+            delay(400)
+            fetchMediaPlaybackInfo()
+        }
+    }
+
+    private fun parseMediaSessionOutput(output: String): MediaPlaybackInfo {
+        if (output.isBlank() || output.contains("No media sessions", ignoreCase = true)) {
+            return MediaPlaybackInfo()
+        }
+
+        data class ParsedSession(
+            var pkg: String = "",
+            var stateCode: Int = 0,
+            var positionMs: Long = 0L,
+            var durationMs: Long = 0L,
+            var title: String = "",
+            var artist: String = "",
+            var album: String = "",
+            var isActive: Boolean = false
+        )
+
+        val sessions = mutableListOf<ParsedSession>()
+        var current: ParsedSession? = null
+
+        output.lines().forEach { rawLine ->
+            val line = rawLine.replace("\r", "").trim()
+
+            // 检测新 Session 的起始 (以 package= 或 session: 或 MediaSession 为标识)
+            if (line.startsWith("package=")) {
+                val pkgName = line.removePrefix("package=").trim().substringBefore(" ")
+                if (current == null || current?.pkg?.isNotEmpty() == true) {
+                    current = ParsedSession(pkg = pkgName)
+                    sessions.add(current!!)
+                } else {
+                    current?.pkg = pkgName
+                }
+            } else if (line.startsWith("session:") || (line.contains("MediaSession") && line.contains("/"))) {
+                val extractedPkg = if (line.startsWith("session:")) {
+                    line.removePrefix("session:").trim().substringBefore("/").substringBefore(" ")
+                } else {
+                    // e.g. QQMusicMediaSession com.tencent.qqmusic/QQMusicMediaSession/310 (userId=0)
+                    Regex("""\b([a-zA-Z0-9._]+)/""").find(line)?.groupValues?.get(1)?.trim() ?: ""
+                }
+                if (extractedPkg.isNotEmpty() && !extractedPkg.startsWith("com.android.server.telecom")) {
+                    if (current == null || current?.pkg?.isNotEmpty() == true) {
+                        current = ParsedSession(pkg = extractedPkg)
+                        sessions.add(current!!)
+                    } else if (current?.pkg?.isEmpty() == true) {
+                        current?.pkg = extractedPkg
+                    }
+                }
+            }
+
+            current?.let { s ->
+                if (line.startsWith("active=")) {
+                    s.isActive = line.removePrefix("active=").trim().toBoolean()
+                }
+
+                // 播放状态解析 (支持 state=PLAYING(3), state=3, state=PAUSED(2), state=2, state=PlaybackState 等格式)
+                if (line.contains("state=PlaybackState") || line.contains("state=")) {
+                    when {
+                        line.contains("PLAYING", ignoreCase = true) -> s.stateCode = 3
+                        line.contains("PAUSED", ignoreCase = true) -> s.stateCode = 2
+                        line.contains("BUFFERING", ignoreCase = true) -> s.stateCode = 6
+                        line.contains("STOPPED", ignoreCase = true) -> s.stateCode = 1
+                        else -> {
+                            val numMatch = Regex("""state=(?:[A-Za-z_]+\()?(\d+)""").find(line)
+                            numMatch?.groupValues?.get(1)?.toIntOrNull()?.let { s.stateCode = it }
+                        }
+                    }
+                    val posMatch = Regex("""position=(\d+)""").find(line)
+                    posMatch?.groupValues?.get(1)?.toLongOrNull()?.let { s.positionMs = it }
+                }
+
+                // 媒体元数据解析 (支持 description=歌名, 歌手, 专辑 与 android.media.metadata.*)
+                if (line.contains("description=")) {
+                    val desc = line.substringAfter("description=").trim()
+                    if (desc.isNotBlank() && desc != "null") {
+                        if (desc.contains("title=")) {
+                            Regex("""title=([^,]+)""").find(desc)?.groupValues?.get(1)?.trim()?.let { if (it != "null") s.title = it }
+                            Regex("""subtitle=([^,]+)""").find(desc)?.groupValues?.get(1)?.trim()?.let { if (it != "null") s.artist = it }
+                            Regex("""description=([^,]+)""").find(desc)?.groupValues?.get(1)?.trim()?.let { if (it != "null") s.album = it }
+                        } else {
+                            val parts = desc.split(",").map { it.trim() }
+                            if (parts.isNotEmpty() && parts[0].isNotEmpty() && parts[0] != "null") {
+                                s.title = parts[0]
+                            }
+                            if (parts.size > 1 && parts[1].isNotEmpty() && parts[1] != "null") {
+                                s.artist = parts[1]
+                            }
+                            if (parts.size > 2 && parts[2].isNotEmpty() && parts[2] != "null") {
+                                s.album = parts[2]
+                            }
+                        }
+                    }
+                }
+
+                if (line.contains("android.media.metadata.TITLE=")) {
+                    val t = line.substringAfter("android.media.metadata.TITLE=").trim()
+                    if (t.isNotBlank() && t != "null") s.title = t
+                } else if (line.contains("DISPLAY_TITLE=")) {
+                    val t = line.substringAfter("DISPLAY_TITLE=").trim()
+                    if (s.title.isEmpty() && t.isNotBlank() && t != "null") s.title = t
+                }
+
+                if (line.contains("android.media.metadata.ARTIST=")) {
+                    val a = line.substringAfter("android.media.metadata.ARTIST=").trim()
+                    if (a.isNotBlank() && a != "null") s.artist = a
+                } else if (line.contains("DISPLAY_SUBTITLE=")) {
+                    val a = line.substringAfter("DISPLAY_SUBTITLE=").trim()
+                    if (s.artist.isEmpty() && a.isNotBlank() && a != "null") s.artist = a
+                }
+
+                if (line.contains("android.media.metadata.ALBUM=")) {
+                    val al = line.substringAfter("android.media.metadata.ALBUM=").trim()
+                    if (al.isNotBlank() && al != "null") s.album = al
+                }
+
+                if (line.contains("duration=") || line.contains("DURATION=")) {
+                    val durMatch = Regex("""(?:duration|DURATION)=(\d+)""").find(line)
+                    durMatch?.groupValues?.get(1)?.toLongOrNull()?.let { s.durationMs = it }
+                }
+            }
+        }
+
+        // 过滤系统非媒体 Session (如电信/通话 HeadsetMediaButton)
+        val validSessions = sessions.filterNot {
+            it.pkg.startsWith("com.android.server.telecom") || it.pkg == "android" || it.pkg == "com.android.systemui"
+        }
+
+        val best = validSessions.firstOrNull { it.stateCode == 3 && it.title.isNotEmpty() }
+            ?: validSessions.firstOrNull { it.stateCode == 3 }
+            ?: validSessions.firstOrNull { it.stateCode == 2 && it.title.isNotEmpty() }
+            ?: validSessions.firstOrNull { it.stateCode == 2 }
+            ?: validSessions.firstOrNull { it.title.isNotEmpty() }
+            ?: validSessions.firstOrNull { it.isActive && it.pkg.isNotEmpty() }
+            ?: validSessions.firstOrNull()
+
+        if (best == null || (best.pkg.isEmpty() && best.title.isEmpty())) {
+            // 尝试从 Audio playback (lastly played comes first) 中解析正在输出音频的应用包名
+            val audioPlayPkg = Regex("""packages=([a-zA-Z0-9._]+)""").find(output)?.groupValues?.get(1)
+            if (!audioPlayPkg.isNullOrBlank() && !audioPlayPkg.startsWith("com.android.server.telecom")) {
+                val friendlyName = parseFriendlyAppName(audioPlayPkg)
+                return MediaPlaybackInfo(
+                    hasActiveSession = true,
+                    isPlaying = true,
+                    title = "正在播放音频",
+                    packageName = audioPlayPkg,
+                    appName = friendlyName,
+                    stateCode = 3,
+                    stateText = "正在播放"
+                )
+            }
+            return MediaPlaybackInfo(
+                hasActiveSession = false,
+                isPlaying = false,
+                stateText = "未在播放"
+            )
+        }
+
+        val isPlaying = best.stateCode == 3 || best.stateCode == 6
+        val stateText = when (best.stateCode) {
+            3 -> "正在播放"
+            2 -> "已暂停"
+            6 -> "缓冲中"
+            1 -> "已停止"
+            else -> if (isPlaying) "正在播放" else "已暂停"
+        }
+
+        val friendlyName = parseFriendlyAppName(best.pkg)
+
+        return MediaPlaybackInfo(
+            hasActiveSession = true,
+            isPlaying = isPlaying,
+            title = best.title.ifEmpty { "正在播放" },
+            artist = best.artist,
+            album = best.album,
+            packageName = best.pkg,
+            appName = friendlyName,
+            durationMs = best.durationMs,
+            positionMs = best.positionMs,
+            stateCode = best.stateCode,
+            stateText = stateText
+        )
     }
 
     /**

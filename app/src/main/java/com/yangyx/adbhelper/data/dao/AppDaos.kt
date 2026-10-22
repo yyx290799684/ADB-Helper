@@ -11,10 +11,10 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface DeviceDao {
-    @Query("SELECT * FROM devices ORDER BY isFavorite DESC, sortOrder ASC, lastConnectedTime DESC")
+    @Query("SELECT * FROM devices ORDER BY isFavorite DESC, lastConnectedTime DESC, sortOrder ASC")
     fun getAllDevices(): Flow<List<DeviceEntity>>
 
-    @Query("SELECT * FROM devices")
+    @Query("SELECT * FROM devices ORDER BY isFavorite DESC, lastConnectedTime DESC, sortOrder ASC")
     suspend fun getAllDevicesDirect(): List<DeviceEntity>
 
     @Query("SELECT * FROM devices WHERE ipAddress = :ip AND port = :port LIMIT 1")

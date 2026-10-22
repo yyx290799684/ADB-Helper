@@ -32,6 +32,24 @@ import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.BrightnessHigh
+import androidx.compose.material.icons.filled.BrightnessLow
+import androidx.compose.material.icons.filled.BrightnessMedium
+import androidx.compose.material.icons.filled.DoNotDisturb
+import androidx.compose.material.icons.filled.LocationOff
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Nfc
+import androidx.compose.material.icons.filled.NotificationsNone
+import androidx.compose.material.icons.filled.ScreenLockRotation
+import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.SignalCellularAlt
+import androidx.compose.material.icons.filled.SignalCellularConnectedNoInternet0Bar
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DeveloperBoard
@@ -73,6 +91,9 @@ import androidx.compose.material.icons.filled.VolumeMute
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -82,7 +103,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -116,6 +139,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -123,6 +147,8 @@ import com.yangyx.adbhelper.ui.AdbViewModel
 import com.yangyx.adbhelper.ui.models.RebootOption
 import com.yangyx.adbhelper.ui.models.TouchpadMode
 import com.yangyx.adbhelper.ui.models.TouchpadProtocol
+import com.yangyx.adbhelper.ui.models.BrightnessConverter
+import kotlin.math.roundToInt
 import com.yangyx.adbhelper.input.VirtualMouseStatus
 import com.yangyx.adbhelper.input.DriverType
 
@@ -384,13 +410,17 @@ private fun DeviceControlTab(
     isGlassMode: Boolean
 ) {
     val densityInfo by viewModel.deviceDensity.collectAsState()
+    val quickSettings by viewModel.deviceQuickSettings.collectAsState()
+    val mediaInfo by viewModel.mediaPlaybackInfo.collectAsState()
     var pendingRebootOption by remember { mutableStateOf<RebootOption?>(null) }
     var dpiInputText by remember { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
 
-    // 初始化时获取最新的 DPI 与分辨率
+    // 初始化时获取最新的 DPI、分辨率、控制中心开关状态与正在播放媒体信息
     LaunchedEffect(Unit) {
         viewModel.fetchDeviceDensity()
+        viewModel.fetchQuickSettings()
+        viewModel.fetchMediaPlaybackInfo()
     }
 
     // 当获取到当前 DPI 时，若输入框为空则填充当前值
@@ -425,19 +455,544 @@ private fun DeviceControlTab(
                     fontWeight = FontWeight.Bold
                 )
                 IconButton(
-                    onClick = { viewModel.fetchDeviceDensity() },
-                    enabled = !densityInfo.isLoading
+                    onClick = {
+                        viewModel.fetchDeviceDensity()
+                        viewModel.fetchQuickSettings()
+                        viewModel.fetchMediaPlaybackInfo()
+                    },
+                    enabled = !densityInfo.isLoading && !quickSettings.isLoading && !mediaInfo.isLoading
                 ) {
-                    if (densityInfo.isLoading) {
+                    if (densityInfo.isLoading || quickSettings.isLoading || mediaInfo.isLoading) {
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新 DPI")
+                        Icon(Icons.Default.Refresh, contentDescription = "刷新控制状态")
                     }
                 }
             }
         }
 
-        // 1. 设备 DPI 与显示控制 Card
+        // 1. 快捷控制中心 Card (模拟真实手机下拉控制栏大药丸滑块与磁贴)
+        item(key = "quick_settings_control") {
+            InfoCard(
+                title = "系统快捷控制中心 (Control Center)",
+                icon = Icons.Default.Tune,
+                iconTint = MaterialTheme.colorScheme.primary
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "实时读取被控端系统设置状态。点击磁贴一键开关，拖动滑块实时调节屏幕亮度。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(
+                        onClick = { viewModel.fetchQuickSettings() },
+                        enabled = !quickSettings.isLoading,
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        if (quickSettings.isLoading) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "刷新控制状态",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 亮度控制滑块胶囊 (真实手机下拉状态栏大药丸滑块风格)
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        val currentPerceptualPercent = remember(quickSettings.brightness) {
+                            BrightnessConverter.rawBrightnessToPercent(quickSettings.brightness)
+                        }
+
+                        var sliderPercent by remember(quickSettings.brightness) {
+                            mutableFloatStateOf(currentPerceptualPercent.toFloat())
+                        }
+                        var isDragging by remember { mutableStateOf(false) }
+
+                        val displayPercent = if (isDragging) sliderPercent.roundToInt() else currentPerceptualPercent
+                        val displayRaw = if (isDragging) BrightnessConverter.percentToRawBrightness(sliderPercent) else quickSettings.brightness
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = if (displayPercent > 70) Icons.Default.BrightnessHigh
+                                        else if (displayPercent > 25) Icons.Default.BrightnessMedium
+                                        else Icons.Default.BrightnessLow,
+                                    contentDescription = "亮度",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "屏幕亮度",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "$displayPercent% ($displayRaw)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            // 自动亮度切换 Pill
+                            FilterChip(
+                                selected = quickSettings.isAutoBrightnessOn,
+                                onClick = { viewModel.toggleAutoBrightness() },
+                                label = {
+                                    Text(
+                                        text = if (quickSettings.isAutoBrightnessOn) "自动: 开" else "自动: 关",
+                                        fontSize = 11.sp
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.BrightnessAuto,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.height(28.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Slider(
+                            value = sliderPercent,
+                            onValueChange = {
+                                isDragging = true
+                                sliderPercent = it
+                            },
+                            onValueChangeFinished = {
+                                isDragging = false
+                                val targetRaw = BrightnessConverter.percentToRawBrightness(sliderPercent)
+                                viewModel.setScreenBrightness(targetRaw)
+                            },
+                            valueRange = 0f..100f,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(28.dp)
+                        )
+
+                        // 快捷百分比挡位微调按钮 (0%, 25%, 50%, 75%, 100%)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            listOf(0, 25, 50, 75, 100).forEach { preset ->
+                                val isSelected = displayPercent == preset
+                                Surface(
+                                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.clickable {
+                                        sliderPercent = preset.toFloat()
+                                        val targetRaw = BrightnessConverter.percentToRawBrightness(preset.toFloat())
+                                        viewModel.setScreenBrightness(targetRaw)
+                                    }
+                                ) {
+                                    Text(
+                                        text = "$preset%",
+                                        fontSize = 11.sp,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 磁贴网格 (Quick Settings Tiles - 2列磁贴布局，复刻真实系统下拉通知控制栏)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Row 1: 蓝牙 & Wi-Fi
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        QuickTile(
+                            title = "蓝牙",
+                            subtitle = if (quickSettings.isBluetoothOn) "已开启" else "已关闭",
+                            icon = if (quickSettings.isBluetoothOn) Icons.Default.Bluetooth else Icons.Default.BluetoothDisabled,
+                            isActive = quickSettings.isBluetoothOn,
+                            onClick = { viewModel.toggleBluetooth() },
+                            modifier = Modifier.weight(1f)
+                        )
+                        QuickTile(
+                            title = "Wi-Fi",
+                            subtitle = if (quickSettings.isWifiOn) "已开启" else "已关闭",
+                            icon = if (quickSettings.isWifiOn) Icons.Default.Wifi else Icons.Default.WifiOff,
+                            isActive = quickSettings.isWifiOn,
+                            onClick = { viewModel.toggleWifi() },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Row 2: 静音模式 & 勿扰模式
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        QuickTile(
+                            title = "静音模式",
+                            subtitle = if (quickSettings.isMuteOn) "静音/振动" else "正常响铃",
+                            icon = if (quickSettings.isMuteOn) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                            isActive = quickSettings.isMuteOn,
+                            onClick = { viewModel.toggleMute() },
+                            modifier = Modifier.weight(1f)
+                        )
+                        QuickTile(
+                            title = "勿扰模式",
+                            subtitle = if (quickSettings.isZenModeOn) "已开启勿扰" else "已关闭",
+                            icon = if (quickSettings.isZenModeOn) Icons.Default.DoNotDisturb else Icons.Default.NotificationsNone,
+                            isActive = quickSettings.isZenModeOn,
+                            onClick = { viewModel.toggleZenMode() },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Row 3: 定位服务 & NFC
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        QuickTile(
+                            title = "定位服务",
+                            subtitle = if (quickSettings.isLocationOn) "GPS 开启" else "已关闭",
+                            icon = if (quickSettings.isLocationOn) Icons.Default.LocationOn else Icons.Default.LocationOff,
+                            isActive = quickSettings.isLocationOn,
+                            onClick = { viewModel.toggleLocation() },
+                            modifier = Modifier.weight(1f)
+                        )
+                        QuickTile(
+                            title = "NFC",
+                            subtitle = if (!quickSettings.hasNfc) "未搭载/不支持" else if (quickSettings.isNfcOn) "已开启" else "已关闭",
+                            icon = Icons.Default.Nfc,
+                            isActive = quickSettings.isNfcOn,
+                            enabled = quickSettings.hasNfc,
+                            onClick = { viewModel.toggleNfc() },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Row 4: 自动旋转 & 移动数据
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        QuickTile(
+                            title = "自动旋转",
+                            subtitle = if (quickSettings.isAutoRotateOn) "旋转已开启" else "锁定竖屏",
+                            icon = if (quickSettings.isAutoRotateOn) Icons.Default.ScreenRotation else Icons.Default.ScreenLockRotation,
+                            isActive = quickSettings.isAutoRotateOn,
+                            onClick = { viewModel.toggleAutoRotate() },
+                            modifier = Modifier.weight(1f)
+                        )
+                        QuickTile(
+                            title = "移动数据",
+                            subtitle = if (quickSettings.isMobileDataOn) "已开启" else "已关闭",
+                            icon = if (quickSettings.isMobileDataOn) Icons.Default.SignalCellularAlt else Icons.Default.SignalCellularConnectedNoInternet0Bar,
+                            isActive = quickSettings.isMobileDataOn,
+                            onClick = { viewModel.toggleMobileData() },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 1.5. 当前媒体播放与控制 Card
+        item(key = "media_playback_control") {
+            InfoCard(
+                title = "当前媒体播放 (Now Playing)",
+                icon = Icons.Default.GraphicEq,
+                iconTint = Color(0xFF06B6D4)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "实时获取对端正在播放的音频、音乐与视频信息，并支持远程遥控播放与切歌。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(
+                        onClick = { viewModel.fetchMediaPlaybackInfo() },
+                        enabled = !mediaInfo.isLoading,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        if (mediaInfo.isLoading) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "刷新媒体状态",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                if (mediaInfo.hasActiveSession || mediaInfo.title.isNotBlank()) {
+                    // 正在播放或有活跃媒体会话
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.size(54.dp)
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.fillMaxSize()
+                                    ) {
+                                        Icon(
+                                            imageVector = if (mediaInfo.isPlaying) Icons.Default.GraphicEq else Icons.Default.MusicNote,
+                                            contentDescription = "Media Icon",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(28.dp)
+                                        )
+                                    }
+                                }
+
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = mediaInfo.displayTitle,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    if (mediaInfo.displayArtist.isNotBlank()) {
+                                        Text(
+                                            text = mediaInfo.displayArtist,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    ) {
+                                        if (mediaInfo.appName.isNotBlank()) {
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                                                shape = RoundedCornerShape(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = mediaInfo.appName,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+
+                                        Surface(
+                                            color = if (mediaInfo.isPlaying) Color(0xFF10B981).copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceVariant,
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text(
+                                                text = if (mediaInfo.isPlaying) "▶ 正在播放" else "⏸ ${mediaInfo.stateText}",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if (mediaInfo.isPlaying) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (mediaInfo.durationMs > 0) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                LinearProgressIndicator(
+                                    progress = { mediaInfo.progress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(4.dp)
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = mediaInfo.positionText,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = mediaInfo.durationText,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                FilledTonalIconButton(
+                                    onClick = { viewModel.mediaPrevious() },
+                                    modifier = Modifier.size(42.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.SkipPrevious,
+                                        contentDescription = "上一曲",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+
+                                FilledIconButton(
+                                    onClick = { viewModel.mediaPlayPause() },
+                                    modifier = Modifier.size(50.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (mediaInfo.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                        contentDescription = "播放/暂停",
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+
+                                FilledTonalIconButton(
+                                    onClick = { viewModel.mediaNext() },
+                                    modifier = Modifier.size(42.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.SkipNext,
+                                        contentDescription = "下一曲",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.MusicNote,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Text(
+                                text = "暂无检测到活跃的媒体播放",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "支持读取网易云、QQ音乐、酷狗、哔哩哔哩、YouTube、Spotify等任意对端播放中的媒体信息。",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { viewModel.fetchMediaPlaybackInfo() },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("刷新检测", fontSize = 12.sp)
+                                }
+                                FilledTonalButton(
+                                    onClick = { viewModel.mediaPlayPause() },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("唤醒播放", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. 设备 DPI 与显示控制 Card
         item(key = "dpi_control") {
             InfoCard(
                 title = "屏幕 DPI 与分辨率控制 (wm density)",
@@ -806,6 +1361,107 @@ private fun DeviceControlTab(
     }
 }
 
+@Composable
+private fun QuickTile(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    isActive: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    val containerColor = if (!enabled) {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+    } else if (isActive) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+
+    val contentColor = if (!enabled) {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    } else if (isActive) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+
+    val iconContainerColor = if (!enabled) {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+    } else if (isActive) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+    }
+
+    val iconColor = if (!enabled) {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    } else if (isActive) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(16.dp),
+        color = containerColor,
+        border = BorderStroke(
+            1.dp,
+            if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+        ),
+        modifier = modifier.height(60.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = iconContainerColor,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = title,
+                        tint = iconColor,
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(9.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = title,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = contentColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = subtitle,
+                    fontSize = 11.sp,
+                    color = contentColor.copy(alpha = 0.75f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
 /**
  * 选项卡 3：输入控制 (支持 input text 文本输入与 input keyevent 丰富按键模拟)
  */
@@ -819,6 +1475,7 @@ private fun DeviceInputTab(
     val inputText by viewModel.deviceInputText.collectAsState()
     val customKeyCode by viewModel.deviceCustomKeyCode.collectAsState()
     val customKeyIsLongPress by viewModel.deviceCustomKeyIsLongPress.collectAsState()
+    val mediaInfo by viewModel.mediaPlaybackInfo.collectAsState()
     val focusManager = LocalFocusManager.current
 
     val densityInfo by viewModel.deviceDensity.collectAsState()
@@ -1084,6 +1741,55 @@ private fun DeviceInputTab(
                 icon = Icons.Default.VolumeUp,
                 iconTint = Color(0xFF10B981)
             ) {
+                // 如果对端有媒体在播，展示在播状态条
+                if (mediaInfo.hasActiveSession || mediaInfo.title.isNotBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (mediaInfo.isPlaying) Icons.Default.GraphicEq else Icons.Default.MusicNote,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = mediaInfo.displayTitle,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = buildString {
+                                        if (mediaInfo.displayArtist.isNotBlank()) append(mediaInfo.displayArtist)
+                                        if (mediaInfo.appName.isNotBlank()) {
+                                            if (isNotEmpty()) append(" · ")
+                                            append(mediaInfo.appName)
+                                        }
+                                        if (isNotEmpty()) append(" (")
+                                        append(if (mediaInfo.isPlaying) "播放中" else mediaInfo.stateText)
+                                        if (isNotEmpty()) append(")")
+                                    },
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // 音量控制
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1128,7 +1834,7 @@ private fun DeviceInputTab(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(
-                        onClick = { viewModel.sendInputKeyEvent(88, "上一曲") },
+                        onClick = { viewModel.mediaPrevious() },
                         shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                         modifier = Modifier.weight(1f)
@@ -1139,18 +1845,22 @@ private fun DeviceInputTab(
                     }
 
                     OutlinedButton(
-                        onClick = { viewModel.sendInputKeyEvent(85, "播放/暂停") },
+                        onClick = { viewModel.mediaPlayPause() },
                         shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                         modifier = Modifier.weight(1.25f)
                     ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = "Play/Pause", modifier = Modifier.size(16.dp))
+                        Icon(
+                            imageVector = if (mediaInfo.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = "Play/Pause",
+                            modifier = Modifier.size(16.dp)
+                        )
                         Spacer(modifier = Modifier.width(3.dp))
-                        Text("播放/暂停", fontSize = 11.sp, maxLines = 1, softWrap = false)
+                        Text(if (mediaInfo.isPlaying) "暂停" else "播放", fontSize = 11.sp, maxLines = 1, softWrap = false)
                     }
 
                     OutlinedButton(
-                        onClick = { viewModel.sendInputKeyEvent(87, "下一曲") },
+                        onClick = { viewModel.mediaNext() },
                         shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                         modifier = Modifier.weight(1f)

@@ -40,7 +40,7 @@ import com.yangyx.adbhelper.ui.models.BottomBarMode
 import com.yangyx.adbhelper.ui.models.LiquidGlassConfig
 
 /**
- * 底部导航栏模式切换抽屉（支持大类的拟态透明流体玻璃和经典 Material 3 模式切换）
+ * 外观风格与底栏模式设置抽屉（支持拟态流体玻璃与经典 Material 3 模式）
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -79,13 +79,13 @@ fun BottomBarSettingsSheet(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "底栏风格模式",
+                        text = "底栏外观风格设置",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "自由切换拟态透明流体玻璃或经典 Material 3 沉浸底栏",
+                        text = "个性化定制拟态流体玻璃与经典 Material 3 模式",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -95,6 +95,15 @@ fun BottomBarSettingsSheet(
             HorizontalDivider(
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                 modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            // Section: Bottom Navigation Bar Mode
+            Text(
+                text = "底栏风格模式",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp)
             )
 
             // Mode Option 1: Liquid Glass (Kyant0 inspired)

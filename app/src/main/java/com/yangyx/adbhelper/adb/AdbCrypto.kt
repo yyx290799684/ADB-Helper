@@ -195,7 +195,7 @@ class AdbCrypto private constructor(val keyPair: KeyPair, private val context: C
         var temp = bigInt
         val mask = BigInteger.valueOf(0xFFFFFFFFL)
         for (i in 0 until wordCount) {
-            words[i] = temp.and(mask).longValueExact()
+            words[i] = temp.and(mask).toLong()
             temp = temp.shiftRight(32)
         }
         return words

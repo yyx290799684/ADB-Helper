@@ -28,6 +28,9 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
+        android:hardwareAccelerated="true"
+        android:largeHeap="true"
+        android:appCategory="game"
         android:theme="@style/Theme.MyApplication">
 
         <service
@@ -49,6 +52,64 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 2x2 快捷连接小部件 -->
+        <receiver
+            android:name=".widget.QuickConnectWidgetProvider2x2"
+            android:label="@string/widget_2x2_name"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="miui.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_quick_2x2_info" />
+            <meta-data
+                android:name="miuiWidget"
+                android:value="true" />
+            <meta-data
+                android:name="miuiWidgetRefresh"
+                android:value="exposure" />
+            <meta-data
+                android:name="miuiWidgetRefreshMinInterval"
+                android:value="10000" />
+        </receiver>
+
+        <!-- 4x2 控制中心小部件 -->
+        <receiver
+            android:name=".widget.ControlCenterWidgetProvider4x2"
+            android:label="@string/widget_4x2_name"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="miui.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_control_4x2_info" />
+            <meta-data
+                android:name="miuiWidget"
+                android:value="true" />
+            <meta-data
+                android:name="miuiWidgetRefresh"
+                android:value="exposure" />
+            <meta-data
+                android:name="miuiWidgetRefreshMinInterval"
+                android:value="10000" />
+        </receiver>
+
+        <!-- 小部件点击动作广播接收器 -->
+        <receiver
+            android:name=".widget.WidgetActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.yangyx.adbhelper.widget.ACTION_QUICK_CONNECT" />
+                <action android:name="com.yangyx.adbhelper.widget.ACTION_CONNECT_DEVICE" />
+                <action android:name="com.yangyx.adbhelper.widget.ACTION_DISCONNECT" />
+                <action android:name="com.yangyx.adbhelper.widget.ACTION_EXECUTE_ACTION" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

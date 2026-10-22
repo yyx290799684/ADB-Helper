@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_2x2_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_card_bg"
+    android:orientation="vertical"
+    android:padding="8dp">
+
+    <!-- Top Header: Logo + App Title + Status Badge -->
+    <RelativeLayout
+        android:id="@+id/layout_header"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:id="@+id/iv_app_icon"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_centerVertical="true"
+            android:src="@mipmap/ic_launcher_round"
+            android:contentDescription="App Icon" />
+
+        <TextView
+            android:id="@+id/tv_app_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_toEndOf="@id/iv_app_icon"
+            android:layout_centerVertical="true"
+            android:layout_marginStart="5dp"
+            android:text="ADB 助手"
+            android:textColor="@color/widget_text_primary"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <!-- Status Dot & Status Text -->
+        <LinearLayout
+            android:id="@+id/layout_status_badge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentEnd="true"
+            android:layout_centerVertical="true"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <ImageView
+                android:id="@+id/iv_status_dot"
+                android:layout_width="6dp"
+                android:layout_height="6dp"
+                android:src="@drawable/widget_status_dot_disconnected"
+                android:contentDescription="Status Indicator" />
+
+            <TextView
+                android:id="@+id/tv_status_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:text="未连接"
+                android:textColor="@color/widget_text_secondary"
+                android:textSize="10sp" />
+        </LinearLayout>
+    </RelativeLayout>
+
+    <!-- Case 1: Disconnected View (Shows Up to 5 Recent Devices to Connect) -->
+    <LinearLayout
+        android:id="@+id/layout_disconnected_2x2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:orientation="vertical"
+        android:visibility="visible">
+
+        <!-- Device Row 1 -->
+        <LinearLayout
+            android:id="@+id/item_dev_1_2x2"
+            android:layout_width="match_parent"
+            android:layout_height="22dp"
+            android:background="@drawable/widget_item_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="6dp">
+
+            <ImageView
+                android:layout_width="5dp"
+                android:layout_height="5dp"
+                android:src="@drawable/widget_status_dot_disconnected"
+                android:contentDescription="Dot" />
+
+            <TextView
+                android:id="@+id/tv_dev_name_1_2x2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="快速连接设备 1"
+                android:textColor="@color/widget_text_primary"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/tv_dev_action_1_2x2"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:minWidth="30dp"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:maxLines="1"
+                android:ellipsize="none"
+                android:text="连接"
+                android:textColor="@color/widget_accent"
+                android:textSize="9sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Device Row 2 -->
+        <LinearLayout
+            android:id="@+id/item_dev_2_2x2"
+            android:layout_width="match_parent"
+            android:layout_height="22dp"
+            android:layout_marginTop="2dp"
+            android:background="@drawable/widget_item_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="6dp">
+
+            <ImageView
+                android:layout_width="5dp"
+                android:layout_height="5dp"
+                android:src="@drawable/widget_status_dot_disconnected"
+                android:contentDescription="Dot" />
+
+            <TextView
+                android:id="@+id/tv_dev_name_2_2x2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="设备 2"
+                android:textColor="@color/widget_text_primary"
+                android:textSize="10sp"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/tv_dev_action_2_2x2"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:minWidth="30dp"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:maxLines="1"
+                android:ellipsize="none"
+                android:text="连接"
+                android:textColor="@color/widget_accent"
+                android:textSize="9sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Device Row 3 -->
+        <LinearLayout
+            android:id="@+id/item_dev_3_2x2"
+            android:layout_width="match_parent"
+            android:layout_height="22dp"
+            android:layout_marginTop="2dp"
+            android:background="@drawable/widget_item_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="6dp">
+
+            <ImageView
+                android:layout_width="5dp"
+                android:layout_height="5dp"
+                android:src="@drawable/widget_status_dot_disconnected"
+                android:contentDescription="Dot" />
+
+            <TextView
+                android:id="@+id/tv_dev_name_3_2x2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="设备 3"
+                android:textColor="@color/widget_text_primary"
+                android:textSize="10sp"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/tv_dev_action_3_2x2"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:minWidth="30dp"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:maxLines="1"
+                android:ellipsize="none"
+                android:text="连接"
+                android:textColor="@color/widget_accent"
+                android:textSize="9sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Device Row 4 -->
+        <LinearLayout
+            android:id="@+id/item_dev_4_2x2"
+            android:layout_width="match_parent"
+            android:layout_height="22dp"
+            android:layout_marginTop="2dp"
+            android:background="@drawable/widget_item_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="6dp">
+
+            <ImageView
+                android:layout_width="5dp"
+                android:layout_height="5dp"
+                android:src="@drawable/widget_status_dot_disconnected"
+                android:contentDescription="Dot" />
+
+            <TextView
+                android:id="@+id/tv_dev_name_4_2x2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="设备 4"
+                android:textColor="@color/widget_text_primary"
+                android:textSize="10sp"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/tv_dev_action_4_2x2"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:minWidth="30dp"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:maxLines="1"
+                android:ellipsize="none"
+                android:text="连接"
+                android:textColor="@color/widget_accent"
+                android:textSize="9sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Device Row 5 -->
+        <LinearLayout
+            android:id="@+id/item_dev_5_2x2"
+            android:layout_width="match_parent"
+            android:layout_height="22dp"
+            android:layout_marginTop="2dp"
+            android:background="@drawable/widget_item_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="6dp">
+
+            <ImageView
+                android:layout_width="5dp"
+                android:layout_height="5dp"
+                android:src="@drawable/widget_status_dot_disconnected"
+                android:contentDescription="Dot" />
+
+            <TextView
+                android:id="@+id/tv_dev_name_5_2x2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="设备 5"
+                android:textColor="@color/widget_text_primary"
+                android:textSize="10sp"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/tv_dev_action_5_2x2"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:minWidth="30dp"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:singleLine="true"
+                android:maxLines="1"
+                android:ellipsize="none"
+                android:text="连接"
+                android:textColor="@color/widget_accent"
+                android:textSize="9sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Case 2: Connected View (Shows Active Device Info & Configurable Action Buttons) -->
+    <LinearLayout
+        android:id="@+id/layout_connected_2x2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="5dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <!-- Device Info Header (Clickable to open connected device) -->
+        <LinearLayout
+            android:id="@+id/layout_device_info_2x2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/widget_item_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:orientation="vertical"
+            android:paddingHorizontal="6dp"
+            android:paddingVertical="4dp">
+
+            <TextView
+                android:id="@+id/tv_device_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ADB 设备"
+                android:textColor="@color/widget_text_primary"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/tv_device_ip"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:text="192.168.1.100:5555"
+                android:textColor="@color/widget_text_secondary"
+                android:textSize="10sp"
+                android:singleLine="true"
+                android:ellipsize="end" />
+        </LinearLayout>
+
+        <!-- 2 Configurable Action Buttons -->
+        <LinearLayout
+            android:id="@+id/layout_connected_actions"
+            android:layout_width="match_parent"
+            android:layout_height="32dp"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <!-- Action Slot 1 -->
+            <LinearLayout
+                android:id="@+id/btn_action_1_2x2"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@drawable/widget_tile_bg"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:orientation="horizontal"
+                android:paddingHorizontal="4dp">
+
+                <ImageView
+                    android:id="@+id/iv_action_1_2x2"
+                    android:layout_width="15dp"
+                    android:layout_height="15dp"
+                    android:src="@drawable/ic_widget_power"
+                    android:contentDescription="Action 1" />
+
+                <TextView
+                    android:id="@+id/tv_action_1_2x2"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:text="锁屏"
+                    android:textColor="@color/widget_text_primary"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Action Slot 2 -->
+            <LinearLayout
+                android:id="@+id/btn_action_2_2x2"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/widget_tile_bg"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:orientation="horizontal"
+                android:paddingHorizontal="4dp">
+
+                <ImageView
+                    android:id="@+id/iv_action_2_2x2"
+                    android:layout_width="15dp"
+                    android:layout_height="15dp"
+                    android:src="@drawable/ic_widget_screenshot"
+                    android:contentDescription="Action 2" />
+
+                <TextView
+                    android:id="@+id/tv_action_2_2x2"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:text="截屏"
+                    android:textColor="@color/widget_text_primary"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Disconnect Button for 2x2 -->
+        <LinearLayout
+            android:id="@+id/btn_disconnect_2x2"
+            android:layout_width="match_parent"
+            android:layout_height="28dp"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/widget_item_bg"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:src="@drawable/ic_widget_disconnect"
+                android:contentDescription="断开连接" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:text="断开连接"
+                android:textColor="@color/widget_danger"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+</LinearLayout>

@@ -16,6 +16,7 @@ import com.yangyx.adbhelper.adb.AdbSyncClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -84,9 +85,27 @@ class ScrcpyController(
     )
 
     fun setSurface(surface: Surface?) {
+        if (activeSurface === surface && surface != null && surface.isValid) return
         activeSurface = surface
         if (surface != null && surface.isValid) {
             currentDecoder?.setSurface(surface)
+            triggerRemoteScreenRefresh()
+        } else if (surface == null) {
+            currentDecoder?.setSurface(null)
+        }
+    }
+
+    /**
+     * 触发被控端屏幕刷新与帧合成，消除黑屏或静态画面等待问题
+     */
+    fun triggerRemoteScreenRefresh() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (connection.isConnected && _screenState.value is ScreenState.Streaming) {
+                    // KEYCODE_WAKEUP (224): 确保远程屏幕激活并迫使 SurfaceFlinger 产生脏矩形，重新合成并编码最新帧
+                    connection.executeShell("input keyevent 224")
+                }
+            } catch (_: Exception) {}
         }
     }
     val isFullscreen = MutableStateFlow(false)
@@ -156,14 +175,24 @@ class ScrcpyController(
     private fun loadConfig(): ScrcpyConfig {
         if (context == null) return ScrcpyConfig()
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val hostOrientationModeStr = prefs.getString("hostOrientationMode", HostOrientationMode.AUTO.name) ?: HostOrientationMode.AUTO.name
+        val hostOrientationMode = try {
+            HostOrientationMode.valueOf(hostOrientationModeStr)
+        } catch (_: Exception) {
+            HostOrientationMode.AUTO
+        }
         return ScrcpyConfig(
             bitrate = prefs.getInt("bitrate", 4000000),
             maxResolution = prefs.getInt("maxResolution", 1080),
             maxFps = prefs.getInt("maxFps", 60),
             videoCodec = prefs.getString("videoCodec", "h264") ?: "h264",
             isScreenOff = prefs.getBoolean("isScreenOff", false),
-            isStayAwake = prefs.getBoolean("isStayAwake", true),
+            isKeepActive = prefs.getBoolean("isKeepActive", prefs.getBoolean("isStayAwake", true)),
+            isPowerOn = prefs.getBoolean("isPowerOn", true),
+            isPowerOffOnClose = prefs.getBoolean("isPowerOffOnClose", false),
             isAudioEnabled = prefs.getBoolean("isAudioEnabled", false),
+            autoRotateHost = prefs.getBoolean("autoRotateHost", true),
+            hostOrientationMode = hostOrientationMode,
             virtualDisplayWidth = prefs.getInt("virtualDisplayWidth", 0),
             virtualDisplayHeight = prefs.getInt("virtualDisplayHeight", 0),
             launchPackageOnVirtualDisplay = prefs.getString("launchPackageOnVirtualDisplay", "") ?: "",
@@ -175,7 +204,19 @@ class ScrcpyController(
             cameraFps = prefs.getInt("cameraFps", 0),
             cameraHighSpeed = prefs.getBoolean("cameraHighSpeed", false),
             cameraTorch = prefs.getBoolean("cameraTorch", false),
-            cameraZoom = prefs.getFloat("cameraZoom", 1.0f)
+            cameraZoom = prefs.getFloat("cameraZoom", 1.0f),
+            videoEncoder = prefs.getString("videoEncoder", "") ?: "",
+            isVideoBufferEnabled = prefs.getBoolean("isVideoBufferEnabled", false),
+            videoBufferMs = prefs.getInt("videoBufferMs", 50),
+            isTopBarExpanded = prefs.getBoolean("isTopBarExpanded", true),
+            isToolbarExpanded = prefs.getBoolean("isToolbarExpanded", true),
+            isToolbarDoubleRow = prefs.getBoolean("isToolbarDoubleRow", false),
+            toolbarButtonOrder = prefs.getString("toolbarButtonOrder", "") ?: "",
+            toolbarHiddenButtons = if (prefs.contains("toolbarHiddenButtonsStr")) {
+                prefs.getString("toolbarHiddenButtonsStr", "")?.split(",")?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+            } else {
+                prefs.getStringSet("toolbarHiddenButtons", emptySet())?.toSet() ?: emptySet()
+            }
         )
     }
 
@@ -189,8 +230,13 @@ class ScrcpyController(
                 .putInt("maxFps", cfg.maxFps)
                 .putString("videoCodec", cfg.videoCodec)
                 .putBoolean("isScreenOff", cfg.isScreenOff)
-                .putBoolean("isStayAwake", cfg.isStayAwake)
+                .putBoolean("isKeepActive", cfg.isKeepActive)
+                .putBoolean("isStayAwake", cfg.isKeepActive)
+                .putBoolean("isPowerOn", cfg.isPowerOn)
+                .putBoolean("isPowerOffOnClose", cfg.isPowerOffOnClose)
                 .putBoolean("isAudioEnabled", cfg.isAudioEnabled)
+                .putBoolean("autoRotateHost", cfg.autoRotateHost)
+                .putString("hostOrientationMode", cfg.hostOrientationMode.name)
                 .putInt("virtualDisplayWidth", cfg.virtualDisplayWidth)
                 .putInt("virtualDisplayHeight", cfg.virtualDisplayHeight)
                 .putString("launchPackageOnVirtualDisplay", cfg.launchPackageOnVirtualDisplay)
@@ -203,6 +249,15 @@ class ScrcpyController(
                 .putBoolean("cameraHighSpeed", cfg.cameraHighSpeed)
                 .putBoolean("cameraTorch", cfg.cameraTorch)
                 .putFloat("cameraZoom", cfg.cameraZoom)
+                .putString("videoEncoder", cfg.videoEncoder)
+                .putBoolean("isVideoBufferEnabled", cfg.isVideoBufferEnabled)
+                .putInt("videoBufferMs", cfg.videoBufferMs)
+                .putBoolean("isTopBarExpanded", cfg.isTopBarExpanded)
+                .putBoolean("isToolbarExpanded", cfg.isToolbarExpanded)
+                .putBoolean("isToolbarDoubleRow", cfg.isToolbarDoubleRow)
+                .putString("toolbarButtonOrder", cfg.toolbarButtonOrder)
+                .putString("toolbarHiddenButtonsStr", cfg.toolbarHiddenButtons.joinToString(","))
+                .putStringSet("toolbarHiddenButtons", HashSet(cfg.toolbarHiddenButtons))
                 .apply()
         }
     }
@@ -262,7 +317,9 @@ class ScrcpyController(
         _config.value = newConfig
         saveConfig(newConfig)
         val sourceDesc = if (newConfig.videoSource == "camera") "摄像头(${newConfig.cameraFacing})" else "屏幕"
-        addLog("配置已更新: 源=$sourceDesc, 分辨率=${if(newConfig.maxResolution==0)"原生" else "${newConfig.maxResolution}p"}, 帧率=${newConfig.maxFps}FPS, 码率=${newConfig.bitrate/1000000}Mbps, 息屏=${newConfig.isScreenOff}, 阻止休眠=${newConfig.isStayAwake}, 音频转发=${newConfig.isAudioEnabled}", LogLevel.INFO)
+        val encoderDesc = if (newConfig.videoEncoder.isNotBlank()) ", 编码器=${newConfig.videoEncoder}" else ""
+        val bufferDesc = if (newConfig.isVideoBufferEnabled) ", 缓冲=${newConfig.videoBufferMs}ms" else ""
+        addLog("配置已更新: 源=$sourceDesc, 分辨率=${if(newConfig.maxResolution==0)"原生" else "${newConfig.maxResolution}p"}, 帧率=${newConfig.maxFps}FPS, 码率=${newConfig.bitrate/1000000}Mbps$encoderDesc$bufferDesc, 点亮屏幕=${newConfig.isPowerOn}, 退出息屏=${newConfig.isPowerOffOnClose}, 息屏=${newConfig.isScreenOff}, 保持活跃=${newConfig.isKeepActive}, 音频转发=${newConfig.isAudioEnabled}", LogLevel.INFO)
         if (_screenState.value is ScreenState.Streaming || _screenState.value is ScreenState.Connecting) {
             val streamRestartNeeded = oldConfig.isAudioEnabled != newConfig.isAudioEnabled ||
                     oldConfig.videoSource != newConfig.videoSource ||
@@ -273,7 +330,8 @@ class ScrcpyController(
                     oldConfig.cameraFps != newConfig.cameraFps ||
                     oldConfig.cameraHighSpeed != newConfig.cameraHighSpeed ||
                     oldConfig.cameraTorch != newConfig.cameraTorch ||
-                    oldConfig.videoCodec != newConfig.videoCodec
+                    oldConfig.videoCodec != newConfig.videoCodec ||
+                    oldConfig.videoEncoder != newConfig.videoEncoder
 
             if (streamRestartNeeded) {
                 scope.launch(Dispatchers.IO) {
@@ -281,6 +339,8 @@ class ScrcpyController(
                     startMirroring()
                 }
             } else {
+                val liveBuffer = if (newConfig.isVideoBufferEnabled) newConfig.videoBufferMs.coerceIn(10, 200) else 0
+                currentDecoder?.setVideoBufferMs(liveBuffer)
                 applyRemoteSettings(newConfig, oldConfig)
             }
         }
@@ -346,6 +406,90 @@ class ScrcpyController(
                 }
             }
         }
+    }
+
+    data class ScrcpyEncoderInfo(
+        val codec: String,         // "h264", "h265", "av1", etc.
+        val name: String,          // e.g. "OMX.qcom.video.encoder.avc"
+        val isHardware: Boolean = true,
+        val isVideo: Boolean = true
+    )
+
+    fun listAvailableEncoders(onResult: (List<ScrcpyEncoderInfo>, String) -> Unit) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                ensureScrcpyServerPushed()
+                val serverVersion = ScrcpyServerManager.state.value.localVersion?.removePrefix("v")?.trim()?.ifEmpty { "3.1" } ?: "3.1"
+                addLog("正在查询被控端所有编解码器 (list_encoders=true)...", LogLevel.INFO)
+                val output = connection.executeShell("CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server $serverVersion list_encoders=true")
+                addLog("被控端编解码器列表:\n$output", LogLevel.SUCCESS)
+
+                val parsed = parseEncoders(output)
+                withContext(Dispatchers.Main) {
+                    onResult(parsed, output.trim())
+                }
+            } catch (e: Exception) {
+                addLog("查询编码器列表失败: ${e.message}", LogLevel.ERROR)
+                withContext(Dispatchers.Main) {
+                    onResult(emptyList(), "查询失败: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun parseEncoders(rawText: String): List<ScrcpyEncoderInfo> {
+        val results = mutableListOf<ScrcpyEncoderInfo>()
+        val lines = rawText.lines()
+        var currentSectionIsVideo = true
+
+        val videoRegex = Regex("""--video-codec=([a-zA-Z0-9_-]+)\s+--video-encoder=['"]?([^'"\s\n]+)['"]?""")
+        val audioRegex = Regex("""--audio-codec=([a-zA-Z0-9_-]+)\s+--audio-encoder=['"]?([^'"\s\n]+)['"]?""")
+
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.contains("video encoders", ignoreCase = true)) {
+                currentSectionIsVideo = true
+                continue
+            } else if (trimmed.contains("audio encoders", ignoreCase = true)) {
+                currentSectionIsVideo = false
+                continue
+            }
+
+            val videoMatch = videoRegex.find(trimmed)
+            if (videoMatch != null) {
+                val codec = videoMatch.groupValues[1]
+                val encoder = videoMatch.groupValues[2]
+                val isHw = !encoder.startsWith("c2.android.", ignoreCase = true) && !encoder.startsWith("OMX.google.", ignoreCase = true)
+                results.add(ScrcpyEncoderInfo(codec = codec, name = encoder, isHardware = isHw, isVideo = true))
+                continue
+            }
+
+            val audioMatch = audioRegex.find(trimmed)
+            if (audioMatch != null) {
+                val codec = audioMatch.groupValues[1]
+                val encoder = audioMatch.groupValues[2]
+                val isHw = !encoder.startsWith("c2.android.", ignoreCase = true) && !encoder.startsWith("OMX.google.", ignoreCase = true)
+                results.add(ScrcpyEncoderInfo(codec = codec, name = encoder, isHardware = isHw, isVideo = false))
+                continue
+            }
+
+            // Fallback for lines mentioning encoder names directly
+            if (trimmed.startsWith("OMX.", ignoreCase = true) || trimmed.startsWith("c2.", ignoreCase = true) || trimmed.contains("encoder", ignoreCase = true)) {
+                val tokens = trimmed.split(Regex("""[\s'"]+"""))
+                val encoderToken = tokens.find { it.startsWith("OMX.", ignoreCase = true) || it.startsWith("c2.", ignoreCase = true) }
+                if (encoderToken != null && results.none { it.name.equals(encoderToken, ignoreCase = true) }) {
+                    val codec = when {
+                        trimmed.contains("hevc", ignoreCase = true) || trimmed.contains("h265", ignoreCase = true) -> "h265"
+                        trimmed.contains("av01", ignoreCase = true) || trimmed.contains("av1", ignoreCase = true) -> "av1"
+                        trimmed.contains("avc", ignoreCase = true) || trimmed.contains("h264", ignoreCase = true) -> "h264"
+                        else -> "h264"
+                    }
+                    val isHw = !encoderToken.startsWith("c2.android.", ignoreCase = true) && !encoderToken.startsWith("OMX.google.", ignoreCase = true)
+                    results.add(ScrcpyEncoderInfo(codec = codec, name = encoderToken, isHardware = isHw, isVideo = currentSectionIsVideo))
+                }
+            }
+        }
+        return results
     }
 
     fun startMirroring() {
@@ -431,8 +575,14 @@ class ScrcpyController(
                     " video_source=display"
                 }
 
-                val stayAwakeParam = if (cfg.isStayAwake) " stay_awake=true" else ""
-                val turnScreenOffParam = if (cfg.isScreenOff && !isCamera) " turn_screen_off=true" else ""
+                val serverVersion = ScrcpyServerManager.state.value.localVersion?.removePrefix("v")?.trim()?.ifEmpty { "3.1" } ?: "3.1"
+                val isVer4Plus = try {
+                    val major = serverVersion.split(".").firstOrNull()?.toIntOrNull() ?: 3
+                    major >= 4
+                } catch (_: Exception) { false }
+                val keepActiveParam = if (cfg.isKeepActive) {
+                    if (isVer4Plus) " keep_active=true" else " stay_awake=true"
+                } else ""
                 val powerOnParam = if (!cfg.isPowerOn) " power_on=false" else ""
                 val powerOffOnCloseParam = if (cfg.isPowerOffOnClose) " power_off_on_close=true" else ""
 
@@ -450,9 +600,9 @@ class ScrcpyController(
                     "av1", "av01" -> " video_codec=av1"
                     else -> " video_codec=h264"
                 }
-                val serverVersion = ScrcpyServerManager.state.value.localVersion?.removePrefix("v")?.trim()?.ifEmpty { "3.1" } ?: "3.1"
-                // scrcpy 2.0+ official parameters:
-                val serverCmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server $serverVersion log_level=info max_size=$maxRes video_bit_rate=${cfg.bitrate} max_fps=${cfg.maxFps}$codecParam$cameraParams$stayAwakeParam$turnScreenOffParam$powerOnParam$powerOffOnCloseParam video_codec_options=i-frame-interval=1 tunnel_forward=true control=true send_dummy_byte=true send_device_meta=true send_frame_meta=true$audioParam cleanup=false$displayParam"
+                val encoderParam = if (cfg.videoEncoder.isNotBlank()) " video_encoder=${cfg.videoEncoder.trim()}" else ""
+                // scrcpy official parameters:
+                val serverCmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server $serverVersion log_level=info max_size=$maxRes video_bit_rate=${cfg.bitrate} max_fps=${cfg.maxFps}$codecParam$encoderParam$cameraParams$keepActiveParam$powerOnParam$powerOffOnCloseParam video_codec_options=i-frame-interval=1 tunnel_forward=true control=true send_dummy_byte=true send_device_meta=true send_frame_meta=true$audioParam cleanup=false$displayParam"
                 addLog("启动官方 scrcpy-server (v$serverVersion, ${cfg.videoCodec}, ${if (isCamera) "Camera" else "Display"}) 进程: $serverCmd", LogLevel.INFO)
 
                 var serverProcessStream: AdbStream? = null
@@ -763,11 +913,13 @@ class ScrcpyController(
                 var lastFpsTime = System.currentTimeMillis()
                 var currentFps = 30f
 
+                val effectiveBufferMs = if (cfg.isVideoBufferEnabled) cfg.videoBufferMs.coerceIn(10, 200) else 0
                 val decoder = H264StreamDecoder(
                     surface = surface,
                     width = actualW,
                     height = actualH,
                     mimeType = mimeType,
+                    videoBufferMs = effectiveBufferMs,
                     onVideoSizeChanged = { newW, newH ->
                         val fixedW = newW and 0xFFFE
                         val fixedH = newH and 0xFFFE
@@ -810,9 +962,17 @@ class ScrcpyController(
                     }
                 )
                 currentDecoder = decoder
-                decoder.start()
+                val isDecoderStarted = decoder.start()
+                if (!isDecoderStarted) {
+                    addLog("视频解码器启动失败，无法进行实时画面渲染", LogLevel.ERROR)
+                    _screenState.value = ScreenState.Error("视频解码器启动失败，建议在设置中切换视频编码为 H.264 或调整分辨率")
+                    try { stream.close() } catch (_: Exception) {}
+                    try { audioStream?.close() } catch (_: Exception) {}
+                    try { serverProcessStream?.close() } catch (_: Exception) {}
+                    return@launch
+                }
 
-                addLog("GPU 硬件解码器已成功绑定 Surface (${actualW}x${actualH}, $mimeType)，开始画面实时渲染！", LogLevel.SUCCESS)
+                addLog("GPU 解码器已成功绑定 Surface (${actualW}x${actualH}, $mimeType)，开始画面实时渲染！", LogLevel.SUCCESS)
 
                 val packetHeaderBuf = ByteArray(12)
                 var packetCount = 0
@@ -1029,19 +1189,63 @@ class ScrcpyController(
         }
     }
 
+    private var keepActiveJob: Job? = null
+
+    private fun startKeepActiveLoop() {
+        stopKeepActiveLoop()
+        if (!_config.value.isKeepActive || _config.value.isScreenOff) return
+        keepActiveJob = scope.launch(Dispatchers.IO) {
+            while (isActive && streamingJob?.isActive == true && _config.value.isKeepActive && !_config.value.isScreenOff) {
+                // 每隔 12 秒向被控端注入一次唤醒/用户活动信号 (KEYCODE_WAKEUP 224)，无需插电亦可重置休眠倒计时保持在线活跃
+                try {
+                    val stream = controlStream
+                    if (stream != null && !stream.isClosed) {
+                        val buf = ByteArray(14)
+                        buf[0] = 0 // TYPE_INJECT_KEYCODE
+                        buf[1] = 0 // DOWN
+                        buf[2] = 0
+                        buf[3] = 0
+                        buf[4] = 0
+                        buf[5] = 224.toByte() // KEYCODE_WAKEUP (224)
+                        stream.write(buf)
+                        buf[1] = 1 // UP
+                        stream.write(buf)
+                    } else {
+                        connection.executeShell("input keyevent 224")
+                    }
+                } catch (_: Exception) {}
+                kotlinx.coroutines.delay(12000L)
+            }
+        }
+    }
+
+    private fun stopKeepActiveLoop() {
+        keepActiveJob?.cancel()
+        keepActiveJob = null
+    }
+
     private suspend fun applyRemoteSettingsInternal(config: ScrcpyConfig, oldConfig: ScrcpyConfig?) {
         try {
             if (oldConfig == null) {
                 connection.executeShell("wm size reset")
             }
 
-            // Handle Stay Awake (阻止休眠 --stay-awake)
-            if (config.isStayAwake && (oldConfig == null || !oldConfig.isStayAwake)) {
-                addLog("启用被控端阻止休眠 (保持常亮/在线状态)...", LogLevel.INFO)
+            // Handle Keep Active (保持活跃/阻止休眠 --keep-active)
+            if (config.isKeepActive && (oldConfig == null || !oldConfig.isKeepActive)) {
+                addLog("启用被控端保持活跃 (keep-active: 即使未插电亦阻止休眠)...", LogLevel.INFO)
                 connection.executeShell("svc power stayon true")
-            } else if (!config.isStayAwake && oldConfig?.isStayAwake == true && !config.isScreenOff) {
-                addLog("关闭被控端阻止休眠...", LogLevel.INFO)
+                startKeepActiveLoop()
+            } else if (!config.isKeepActive && oldConfig?.isKeepActive == true && !config.isScreenOff) {
+                addLog("关闭被控端保持活跃...", LogLevel.INFO)
+                stopKeepActiveLoop()
                 connection.executeShell("svc power stayon false")
+            }
+
+            // Screen Off 与 Keep Active 的协调
+            if (config.isScreenOff && oldConfig?.isScreenOff == false) {
+                stopKeepActiveLoop()
+            } else if (!config.isScreenOff && oldConfig?.isScreenOff == true && config.isKeepActive) {
+                startKeepActiveLoop()
             }
 
             // Handle Screen Off (熄屏控制 --turn-screen-off)
@@ -1063,7 +1267,7 @@ class ScrcpyController(
                         stream.write(byteArrayOf(10, 2)) // 2 = POWER_MODE_NORMAL
                     } catch (_: Exception) {}
                 }
-                if (!config.isStayAwake) {
+                if (!config.isKeepActive) {
                     connection.executeShell("svc power stayon false")
                 }
                 addLog("已恢复被控端亮屏", LogLevel.SUCCESS)
@@ -1082,6 +1286,7 @@ class ScrcpyController(
     fun stopMirroring() {
         isExplicitlyStopped = true
         addLog("停止屏幕投屏...", LogLevel.INFO)
+        stopKeepActiveLoop()
         val wasScreenOff = _config.value.isScreenOff
         val stream = controlStream
         if (wasScreenOff && stream != null && !stream.isClosed) {
@@ -1103,7 +1308,7 @@ class ScrcpyController(
                 if (virtualDisplayId > 0) {
                     virtualDisplayId = -1
                 }
-                if (_config.value.isStayAwake || wasScreenOff) {
+                if (_config.value.isKeepActive || wasScreenOff) {
                     connection.executeShell("svc power stayon false")
                 }
                 if (_config.value.isPowerOffOnClose) {

@@ -13,9 +13,18 @@ import android.graphics.SurfaceTexture
 import android.view.Surface
 import android.view.TextureView
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,6 +38,9 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.FormatListBulleted
+import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -53,8 +65,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.filled.Sort
+import androidx.compose.material.icons.filled.ViewStream
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -95,6 +115,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Checkbox
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.material.icons.filled.VolumeOff
@@ -190,6 +211,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -416,6 +438,11 @@ fun ScrcpyView(
     var isQueryingCameraInfo by remember { mutableStateOf(false) }
     var cameraQueryMode by remember { mutableStateOf(CameraQueryMode.CAMERAS) }
 
+    var showEncoderDialog by remember { mutableStateOf(false) }
+    var isQueryingEncoders by remember { mutableStateOf(false) }
+    var encoderQueryRawText by remember { mutableStateOf("") }
+    var detectedEncoders by remember { mutableStateOf<List<ScrcpyController.ScrcpyEncoderInfo>>(emptyList()) }
+
     var containerWidth by remember { mutableStateOf(1) }
     var containerHeight by remember { mutableStateOf(1) }
 
@@ -573,6 +600,16 @@ fun ScrcpyView(
                                         controller.listAvailableCameraSizes(camId) { result ->
                                             cameraInfoText = result
                                             isQueryingCameraInfo = false
+                                        }
+                                    },
+                                    onQueryEncoders = {
+                                        showEncoderDialog = true
+                                        isQueryingEncoders = true
+                                        encoderQueryRawText = "正在通过 ADB 查询被控端编解码器硬件 (scrcpy --list-encoders)..."
+                                        controller.listAvailableEncoders { encoders, rawOutput ->
+                                            detectedEncoders = encoders
+                                            encoderQueryRawText = rawOutput
+                                            isQueryingEncoders = false
                                         }
                                     }
                                 )
@@ -790,6 +827,16 @@ fun ScrcpyView(
                             controller.listAvailableCameraSizes(camId) { result ->
                                 cameraInfoText = result
                                 isQueryingCameraInfo = false
+                            }
+                        },
+                        onQueryEncoders = {
+                            showEncoderDialog = true
+                            isQueryingEncoders = true
+                            encoderQueryRawText = "正在通过 ADB 查询被控端编解码器硬件 (scrcpy --list-encoders)..."
+                            controller.listAvailableEncoders { encoders, rawOutput ->
+                                detectedEncoders = encoders
+                                encoderQueryRawText = rawOutput
+                                isQueryingEncoders = false
                             }
                         }
                     )
@@ -1047,6 +1094,27 @@ fun ScrcpyView(
                         }
                     }
                 }
+            )
+        }
+
+        if (showEncoderDialog) {
+            EncoderSelectionDialog(
+                currentEncoder = config.videoEncoder,
+                isQuerying = isQueryingEncoders,
+                encoders = detectedEncoders,
+                rawOutput = encoderQueryRawText,
+                onSelectEncoder = { encoder ->
+                    val matchedCodec = encoder?.codec ?: config.videoCodec
+                    val encoderName = encoder?.name ?: ""
+                    controller.updateConfig(config.copy(videoEncoder = encoderName, videoCodec = matchedCodec))
+                    if (encoderName.isBlank()) {
+                        Toast.makeText(context, "已恢复系统默认编码器", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "已选择编码器: $encoderName ($matchedCodec)", Toast.LENGTH_SHORT).show()
+                    }
+                    showEncoderDialog = false
+                },
+                onDismiss = { showEncoderDialog = false }
             )
         }
 
@@ -1475,11 +1543,22 @@ private fun StreamingViewContent(
     var showMultiTouchDialog by remember { mutableStateOf(false) }
     var showVolumeDialog by remember { mutableStateOf(false) }
     var showOrientationDialog by remember { mutableStateOf(false) }
-    var isTopBarExpanded by remember { mutableStateOf(true) }
-    var isToolbarExpanded by remember { mutableStateOf(true) }
+    var isTopBarExpanded by remember(config.isTopBarExpanded) { mutableStateOf(config.isTopBarExpanded) }
+    var topBarOffsetX by remember { mutableFloatStateOf(0f) }
+    var topBarOffsetY by remember { mutableFloatStateOf(0f) }
+    var isToolbarExpanded by remember(config.isToolbarExpanded) { mutableStateOf(config.isToolbarExpanded) }
     var miniFabOffsetX by remember { mutableFloatStateOf(0f) }
     var miniFabOffsetY by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
+
+    // 投屏连接成功后，过 5 秒自动将上方的分辨率、帧率悬浮窗收起为小胶囊（用户手动再次展开后同样在 5 秒无操作后自动折叠）
+    LaunchedEffect(isTopBarExpanded) {
+        if (isTopBarExpanded) {
+            kotlinx.coroutines.delay(5000L)
+            isTopBarExpanded = false
+            controller.updateConfig(config.copy(isTopBarExpanded = false))
+        }
+    }
 
     val activity = context as? Activity
     val isRemoteLandscape = state.width > state.height && state.width > 0 && state.height > 0
@@ -1564,32 +1643,42 @@ private fun StreamingViewContent(
                     // 1. TextureView for rendering Scrcpy / Camera video stream
                     AndroidView(
                         factory = { ctx ->
+                            var activeSurfaceWrapper: Surface? = null
                             TextureView(ctx).apply {
                                 isOpaque = true
                                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                                     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                                        controller.setSurface(Surface(surfaceTexture))
+                                        activeSurfaceWrapper?.release()
+                                        val newSurface = Surface(surfaceTexture)
+                                        activeSurfaceWrapper = newSurface
+                                        controller.setSurface(newSurface)
                                     }
 
                                     override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                                        controller.setSurface(Surface(surfaceTexture))
+                                        surfaceTexture.setDefaultBufferSize(width, height)
+                                        // Do not recreate Surface on size change: the existing Surface stays bound to surfaceTexture
                                     }
 
                                     override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
                                         controller.setSurface(null)
+                                        activeSurfaceWrapper = null
                                         return true
                                     }
 
                                     override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {}
                                 }
                                 if (isAvailable && surfaceTexture != null) {
-                                    controller.setSurface(Surface(surfaceTexture))
+                                    activeSurfaceWrapper?.release()
+                                    val newSurface = Surface(surfaceTexture)
+                                    activeSurfaceWrapper = newSurface
+                                    controller.setSurface(newSurface)
                                 }
                             }
                         },
                         update = { view ->
                             if (view.isAvailable && view.surfaceTexture != null && controller.activeSurface == null) {
-                                controller.setSurface(Surface(view.surfaceTexture))
+                                val newSurface = Surface(view.surfaceTexture)
+                                controller.setSurface(newSurface)
                             }
                         },
                         modifier = Modifier.fillMaxSize()
@@ -1642,354 +1731,501 @@ private fun StreamingViewContent(
             }
         }
 
-        // Top info bar (Collapsible & Expandable)
-        if (isTopBarExpanded) {
-            Surface(
-                color = Color.Black.copy(alpha = 0.8f),
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = if (isFullscreen) 28.dp else 12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = "${state.width}x${state.height} | ${state.fps.toInt()} FPS | ${state.latencyMs}ms" +
-                            (if (isCamera && cameraRotationDegrees != 0) " | ${cameraRotationDegrees}°" else ""),
-                        color = Color.Green,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1
-                    )
-                    IconButton(
-                        onClick = onToggleFullscreen,
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = if (isFullscreen) "退出全屏" else "全屏模式",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
+        // Top info bar (Collapsible & Expandable with smooth centered animation and fixed content metrics to prevent jitter)
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = if (isFullscreen) 24.dp else 10.dp)
+                .offset { IntOffset(topBarOffsetX.roundToInt(), topBarOffsetY.roundToInt()) }
+                .pointerInput(Unit) {
+                    detectDragGesturesAfterLongPress { change, dragAmount ->
+                        change.consume()
+                        topBarOffsetX += dragAmount.x
+                        topBarOffsetY += dragAmount.y
                     }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            AnimatedContent(
+                targetState = isTopBarExpanded,
+                transitionSpec = {
+                    (fadeIn(animationSpec = tween(260)) + scaleIn(initialScale = 0.88f, animationSpec = tween(260)))
+                        .togetherWith(
+                            fadeOut(animationSpec = tween(180)) + scaleOut(targetScale = 0.88f, animationSpec = tween(180))
+                        )
+                },
+                contentAlignment = Alignment.Center,
+                label = "TopInfoBarTransition"
+            ) { expanded ->
+                if (expanded) {
                     Surface(
-                        onClick = { controller.stopMirroring() },
-                        color = MaterialTheme.colorScheme.error,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.height(26.dp)
+                        color = Color.Black.copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(20.dp),
+                        shadowElevation = 8.dp
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            // 使用固定最小宽度与等宽数字展示，防止 FPS/延迟数值跳动引起胶囊整体宽度频繁抖动
+                            val fpsInt = state.fps.toInt().coerceIn(0, 999)
+                            val latencyInt = state.latencyMs.coerceIn(0, 9999)
+                            val extraCam = if (isCamera && cameraRotationDegrees != 0) " | ${cameraRotationDegrees}°" else ""
+                            val statsText = "${state.width}x${state.height} | ${String.format(Locale.US, "%2d", fpsInt)} FPS | ${latencyInt}ms$extraCam"
+
                             Text(
-                                text = "断开投屏",
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
+                                text = statsText,
+                                color = Color.Green,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                modifier = Modifier.widthIn(min = 150.dp)
+                            )
+                            IconButton(
+                                onClick = onToggleFullscreen,
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                    contentDescription = if (isFullscreen) "退出全屏" else "全屏模式",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Surface(
+                                onClick = { controller.stopMirroring() },
+                                color = MaterialTheme.colorScheme.error,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.height(26.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "断开投屏",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = {
+                                    isTopBarExpanded = false
+                                    controller.updateConfig(config.copy(isTopBarExpanded = false))
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardArrowUp,
+                                    contentDescription = "折叠悬浮条 (长按可拖动)",
+                                    tint = Color.White.copy(alpha = 0.8f),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // Collapsed Top Info Badge (Click to expand, long press to drag)
+                    // 设置固定内容宽度与 Monospace 等宽字体，使 0-120 FPS 切换时胶囊宽度始终恒定 92dp，绝无任何抖动
+                    Surface(
+                        onClick = {
+                            isTopBarExpanded = true
+                            controller.updateConfig(config.copy(isTopBarExpanded = true))
+                        },
+                        color = Color.Black.copy(alpha = 0.78f),
+                        shape = RoundedCornerShape(16.dp),
+                        shadowElevation = 6.dp
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .width(92.dp)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                .size(7.dp)
+                                .background(Color.Green, CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            val fpsInt = state.fps.toInt().coerceIn(0, 999)
+                            Text(
+                                text = "${fpsInt} FPS",
+                                color = Color.Green,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "展开悬浮条 (长按可拖动)",
+                                tint = Color.White.copy(alpha = 0.8f),
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }
-                    IconButton(
-                        onClick = { isTopBarExpanded = false },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowUp,
-                            contentDescription = "折叠悬浮条",
-                            tint = Color.White.copy(alpha = 0.8f),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-            }
-        } else {
-            // Collapsed Top Info Badge
-            Surface(
-                onClick = { isTopBarExpanded = true },
-                color = Color.Black.copy(alpha = 0.75f),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = if (isFullscreen) 24.dp else 10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .background(Color.Green, CircleShape)
-                    )
-                    Text(
-                        text = "${state.fps.toInt()} FPS",
-                        color = Color.Green,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = "展开悬浮条",
-                        tint = Color.White.copy(alpha = 0.8f),
-                        modifier = Modifier.size(16.dp)
-                    )
                 }
             }
         }
 
-        // Floating draggable navigation bar (Collapsible & Expandable with Long-press Tooltips)
+        // Floating draggable navigation bar (Collapsible & Expandable with smooth animations)
         val isVirtualActive by controller.isVirtualDisplayActive.collectAsState()
         val screenWidthDp = LocalConfiguration.current.screenWidthDp
 
-        if (isToolbarExpanded) {
+        AnimatedVisibility(
+            visible = isToolbarExpanded,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn(animationSpec = tween(280)) + slideInVertically(initialOffsetY = { it / 2 }, animationSpec = tween(280)) + scaleIn(initialScale = 0.9f, animationSpec = tween(280)),
+            exit = fadeOut(animationSpec = tween(200)) + slideOutVertically(targetOffsetY = { it / 2 }, animationSpec = tween(200)) + scaleOut(targetScale = 0.9f, animationSpec = tween(200))
+        ) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(if (config.isToolbarDoubleRow) 20.dp else 28.dp),
                 tonalElevation = 8.dp,
                 shadowElevation = 12.dp,
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
                     .padding(bottom = if (isFullscreen) 36.dp else 24.dp)
                     .widthIn(max = (screenWidthDp - 20).dp)
                     .offset { IntOffset(overlayOffsetX.roundToInt(), overlayOffsetY.roundToInt()) }
-                    .pointerInput(Unit) {
-                        detectDragGestures { change, dragAmount ->
-                            change.consume()
-                            overlayOffsetX += dragAmount.x
-                            overlayOffsetY += dragAmount.y
-                        }
-                    }
             ) {
-                Row(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                @OptIn(ExperimentalFoundationApi::class)
+                @Composable
+                fun ToolbarActionItem(
+                    icon: androidx.compose.ui.graphics.vector.ImageVector,
+                    name: String,
+                    detailName: String = name,
+                    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    onClick: () -> Unit
                 ) {
-                    @OptIn(ExperimentalFoundationApi::class)
-                    @Composable
-                    fun ToolbarActionItem(
-                        icon: androidx.compose.ui.graphics.vector.ImageVector,
-                        name: String,
-                        detailName: String = name,
-                        tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        onClick: () -> Unit
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .combinedClickable(
+                                onClick = onClick,
+                                onLongClick = {
+                                    Toast.makeText(context, "功能: $detailName", Toast.LENGTH_SHORT).show()
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(42.dp)
-                                .clip(CircleShape)
-                                .combinedClickable(
-                                    onClick = onClick,
-                                    onLongClick = {
-                                        Toast.makeText(context, "功能: $detailName", Toast.LENGTH_SHORT).show()
-                                    }
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = icon,
-                                contentDescription = name,
-                                tint = tint,
-                                modifier = Modifier.size(22.dp)
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = name,
+                            tint = tint,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                @Composable
+                fun RenderToolbarButton(actionId: String) {
+                    when (actionId) {
+                        "back" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.ArrowBack,
+                                name = "返回",
+                                detailName = "返回键 (Back)",
+                                onClick = { controller.sendBack() }
+                            )
+                        }
+                        "home" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.Home,
+                                name = "主页",
+                                detailName = "主页键 (Home)",
+                                onClick = { controller.sendHome() }
+                            )
+                        }
+                        "recents" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.RecentActors,
+                                name = "多任务",
+                                detailName = "多任务 / 最近应用 (Recents)",
+                                onClick = { controller.sendRecents() }
+                            )
+                        }
+                        "wake_up" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.LockOpen,
+                                name = "唤醒屏幕",
+                                detailName = "唤醒并点亮对端屏幕",
+                                tint = MaterialTheme.colorScheme.primary,
+                                onClick = { controller.wakeUpRemoteScreen() }
+                            )
+                        }
+                        "orientation" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.ScreenRotation,
+                                name = "屏幕方向",
+                                detailName = "屏幕方向自适应与旋转控制",
+                                tint = MaterialTheme.colorScheme.primary,
+                                onClick = { showOrientationDialog = true }
+                            )
+                        }
+                        "multi_touch" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.TouchApp,
+                                name = "多点触控",
+                                detailName = "多点触控与手势辅助设置",
+                                onClick = { showMultiTouchDialog = true }
+                            )
+                        }
+                        "keep_active", "stay_awake" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.WbSunny,
+                                name = "保持活跃",
+                                detailName = if (config.isKeepActive) "关闭设备保持活跃" else "开启保持活跃 (阻止休眠 --keep-active)",
+                                tint = if (config.isKeepActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                onClick = {
+                                    val newKeepActive = !config.isKeepActive
+                                    controller.updateConfig(config.copy(isKeepActive = newKeepActive))
+                                }
+                            )
+                        }
+                        "text_input" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.Keyboard,
+                                name = "文字输入",
+                                detailName = "发送文本/剪贴板内容到远端",
+                                onClick = onShowTextInput
+                            )
+                        }
+                        "screen_off" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.ScreenLockPortrait,
+                                name = "熄屏控制",
+                                detailName = if (config.isScreenOff) "点亮远端实体屏幕" else "熄灭对端实体屏幕 (仅镜像)",
+                                tint = if (config.isScreenOff) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                onClick = {
+                                    val newScreenOff = !config.isScreenOff
+                                    controller.updateConfig(config.copy(isScreenOff = newScreenOff))
+                                }
+                            )
+                        }
+                        "volume_down" -> ToolbarActionItem(
+                            icon = Icons.Default.VolumeDown,
+                            name = "音量-",
+                            detailName = "降低被控端系统硬件音量 (Volume Down)",
+                            onClick = {
+                                controller.sendVolumeDown()
+                                Toast.makeText(context, "远程音量 -", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                        "volume_up" -> ToolbarActionItem(
+                            icon = Icons.Default.VolumeUp,
+                            name = "音量+",
+                            detailName = "增加被控端系统硬件音量 (Volume Up)",
+                            onClick = {
+                                controller.sendVolumeUp()
+                                Toast.makeText(context, "远程音量 +", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                        "volume_panel" -> ToolbarActionItem(
+                            icon = Icons.Default.GraphicEq,
+                            name = "远端音量",
+                            detailName = "远程设备系统音量控制面板 (滑块/静音/通道)",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = { showVolumeDialog = true }
+                        )
+                        "audio_stream" -> ToolbarActionItem(
+                            icon = Icons.Default.Headphones,
+                            name = "音频流转",
+                            detailName = if (config.isAudioEnabled) "关闭对端音频流转到本机" else "开启对端实时音频流转到本机",
+                            tint = if (config.isAudioEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = {
+                                val newAudio = !config.isAudioEnabled
+                                controller.updateConfig(config.copy(isAudioEnabled = newAudio))
+                            }
+                        )
+                        "virtual_display" -> if (!isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.Default.Apps,
+                                name = "虚拟副屏",
+                                detailName = "开启独立虚拟副屏分屏",
+                                tint = if (isVirtualActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                onClick = onShowVirtualDisplay
+                            )
+                        }
+                        "logs" -> ToolbarActionItem(
+                            icon = Icons.Default.Terminal,
+                            name = "运行日志",
+                            detailName = "查看 Scrcpy 底层运行与调试日志",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = onShowLogs
+                        )
+                        "settings" -> ToolbarActionItem(
+                            icon = Icons.Default.Settings,
+                            name = "投屏设置",
+                            detailName = "调整分辨率、码率、编解码器与按键排序",
+                            onClick = onShowSettings
+                        )
+                        "fullscreen" -> ToolbarActionItem(
+                            icon = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                            name = "全屏显示",
+                            detailName = if (isFullscreen) "退出全屏模式" else "进入沉浸式全屏模式",
+                            tint = if (isFullscreen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            onClick = onToggleFullscreen
+                        )
+                        "disconnect" -> ToolbarActionItem(
+                            icon = Icons.Default.PowerSettingsNew,
+                            name = "断开投屏",
+                            detailName = "停止画面镜像并关闭连接",
+                            tint = MaterialTheme.colorScheme.error,
+                            onClick = { controller.stopMirroring() }
+                        )
+                        "collapse" -> ToolbarActionItem(
+                            icon = Icons.Default.KeyboardArrowDown,
+                            name = "折叠工具栏",
+                            detailName = "收起工具栏为悬浮小球",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            onClick = {
+                                isToolbarExpanded = false
+                                controller.updateConfig(config.copy(isToolbarExpanded = false))
+                            }
+                        )
+                        "camera_rotate_left" -> if (isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.AutoMirrored.Filled.RotateLeft,
+                                name = "向左旋转",
+                                detailName = "摄像头画面逆时针旋转 90°",
+                                tint = MaterialTheme.colorScheme.primary,
+                                onClick = {
+                                    cameraRotationDegrees = (cameraRotationDegrees - 90 + 360) % 360
+                                }
+                            )
+                        }
+                        "camera_rotate_right" -> if (isCamera) {
+                            ToolbarActionItem(
+                                icon = Icons.AutoMirrored.Filled.RotateRight,
+                                name = "向右旋转",
+                                detailName = "摄像头画面顺时针旋转 90°",
+                                tint = MaterialTheme.colorScheme.primary,
+                                onClick = {
+                                    cameraRotationDegrees = (cameraRotationDegrees + 90) % 360
+                                }
+                            )
+                        }
+                        "camera_flash" -> if (isCamera) {
+                            ToolbarActionItem(
+                                icon = if (config.cameraTorch) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                                name = "闪光灯",
+                                detailName = if (config.cameraTorch) "关闭摄像头补光灯" else "打开摄像头补光灯",
+                                tint = if (config.cameraTorch) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                onClick = {
+                                    val newTorch = !config.cameraTorch
+                                    controller.updateConfig(config.copy(cameraTorch = newTorch))
+                                }
                             )
                         }
                     }
+                }
 
-                    if (!isCamera) {
-                        ToolbarActionItem(
-                            icon = Icons.Default.ArrowBack,
-                            name = "返回",
-                            detailName = "返回键 (Back)",
-                            onClick = { controller.sendBack() }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.Home,
-                            name = "主页",
-                            detailName = "主页键 (Home)",
-                            onClick = { controller.sendHome() }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.RecentActors,
-                            name = "多任务",
-                            detailName = "多任务 / 最近应用 (Recents)",
-                            onClick = { controller.sendRecents() }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.LockOpen,
-                            name = "唤醒屏幕",
-                            detailName = "唤醒并点亮对端屏幕",
-                            tint = MaterialTheme.colorScheme.primary,
-                            onClick = { controller.wakeUpRemoteScreen() }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.ScreenRotation,
-                            name = "屏幕方向",
-                            detailName = "屏幕方向自适应与旋转控制",
-                            tint = MaterialTheme.colorScheme.primary,
-                            onClick = { showOrientationDialog = true }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.TouchApp,
-                            name = "多点触控",
-                            detailName = "多点触控与手势辅助设置",
-                            onClick = { showMultiTouchDialog = true }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.WbSunny,
-                            name = "阻止休眠",
-                            detailName = if (config.isStayAwake) "关闭屏幕常亮保持" else "开启屏幕常亮保持 (阻止休眠)",
-                            tint = if (config.isStayAwake) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            onClick = {
-                                val newStayAwake = !config.isStayAwake
-                                controller.updateConfig(config.copy(isStayAwake = newStayAwake))
-                            }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.Keyboard,
-                            name = "文字输入",
-                            detailName = "发送文本/剪贴板内容到远端",
-                            onClick = onShowTextInput
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.Default.ScreenLockPortrait,
-                            name = "熄屏控制",
-                            detailName = if (config.isScreenOff) "点亮远端实体屏幕" else "熄灭对端实体屏幕 (仅镜像)",
-                            tint = if (config.isScreenOff) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            onClick = {
-                                val newScreenOff = !config.isScreenOff
-                                controller.updateConfig(config.copy(isScreenOff = newScreenOff))
-                            }
-                        )
-                    }
+                val effectiveOrder = config.getEffectiveToolbarOrder()
+                val visibleButtons = effectiveOrder.filter { actionId ->
+                    config.isButtonVisible(actionId) && (!isCamera || TOOLBAR_BUTTON_METAS.find { it.id == actionId }?.isDisplayOnly != true)
+                }
+                val allButtonsToDisplay = buildList {
                     if (isCamera) {
-                        ToolbarActionItem(
-                            icon = Icons.AutoMirrored.Filled.RotateLeft,
-                            name = "向左旋转",
-                            detailName = "摄像头画面逆时针旋转 90°",
-                            tint = MaterialTheme.colorScheme.primary,
-                            onClick = {
-                                cameraRotationDegrees = (cameraRotationDegrees - 90 + 360) % 360
-                            }
-                        )
-                        ToolbarActionItem(
-                            icon = Icons.AutoMirrored.Filled.RotateRight,
-                            name = "向右旋转",
-                            detailName = "摄像头画面顺时针旋转 90°",
-                            tint = MaterialTheme.colorScheme.primary,
-                            onClick = {
-                                cameraRotationDegrees = (cameraRotationDegrees + 90) % 360
-                            }
-                        )
-                        ToolbarActionItem(
-                            icon = if (config.cameraTorch) Icons.Default.FlashOn else Icons.Default.FlashOff,
-                            name = "闪光灯",
-                            detailName = if (config.cameraTorch) "关闭摄像头补光灯" else "打开摄像头补光灯",
-                            tint = if (config.cameraTorch) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            onClick = {
-                                val newTorch = !config.cameraTorch
-                                controller.updateConfig(config.copy(cameraTorch = newTorch))
-                            }
-                        )
+                        add("camera_rotate_left")
+                        add("camera_rotate_right")
+                        add("camera_flash")
                     }
-                    // Remote System Volume controls (independent from audio streaming)
-                    ToolbarActionItem(
-                        icon = Icons.Default.VolumeDown,
-                        name = "音量-",
-                        detailName = "降低被控端系统硬件音量 (Volume Down)",
-                        onClick = {
-                            controller.sendVolumeDown()
-                            Toast.makeText(context, "远程音量 -", Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                    ToolbarActionItem(
-                        icon = Icons.Default.VolumeUp,
-                        name = "音量+",
-                        detailName = "增加被控端系统硬件音量 (Volume Up)",
-                        onClick = {
-                            controller.sendVolumeUp()
-                            Toast.makeText(context, "远程音量 +", Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                    ToolbarActionItem(
-                        icon = Icons.Default.GraphicEq,
-                        name = "远端音量",
-                        detailName = "远程设备系统音量控制面板 (滑块/静音/通道)",
-                        tint = MaterialTheme.colorScheme.primary,
-                        onClick = { showVolumeDialog = true }
-                    )
+                    addAll(visibleButtons)
+                }
 
-                    ToolbarActionItem(
-                        icon = Icons.Default.Headphones,
-                        name = "音频流转",
-                        detailName = if (config.isAudioEnabled) "关闭对端音频流转到本机" else "开启对端实时音频流转到本机",
-                        tint = if (config.isAudioEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        onClick = {
-                            val newAudio = !config.isAudioEnabled
-                            controller.updateConfig(config.copy(isAudioEnabled = newAudio))
-                        }
-                    )
-                    if (!isCamera) {
-                        ToolbarActionItem(
-                            icon = Icons.Default.Apps,
-                            name = "虚拟副屏",
-                            detailName = "开启独立虚拟副屏分屏",
-                            tint = if (isVirtualActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            onClick = onShowVirtualDisplay
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left Drag Grip Handle (Dedicated drag region)
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 8.dp, end = 2.dp)
+                            .size(width = 16.dp, height = if (config.isToolbarDoubleRow) 64.dp else 38.dp)
+                            .pointerInput(Unit) {
+                                detectDragGestures { change, dragAmount ->
+                                    change.consume()
+                                    overlayOffsetX += dragAmount.x
+                                    overlayOffsetY += dragAmount.y
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .height(if (config.isToolbarDoubleRow) 28.dp else 20.dp)
+                            .background(
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f),
+                                RoundedCornerShape(2.dp)
+                            )
                         )
                     }
-                    ToolbarActionItem(
-                        icon = Icons.Default.Terminal,
-                        name = "运行日志",
-                        detailName = "查看 Scrcpy 底层运行与调试日志",
-                        tint = MaterialTheme.colorScheme.primary,
-                        onClick = onShowLogs
-                    )
-                    ToolbarActionItem(
-                        icon = Icons.Default.Settings,
-                        name = "投屏设置",
-                        detailName = "调整分辨率、码率、编解码器与旋转",
-                        onClick = onShowSettings
-                    )
-                    ToolbarActionItem(
-                        icon = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                        name = "全屏显示",
-                        detailName = if (isFullscreen) "退出全屏模式" else "进入沉浸式全屏模式",
-                        tint = if (isFullscreen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        onClick = onToggleFullscreen
-                    )
-                    ToolbarActionItem(
-                        icon = Icons.Default.PowerSettingsNew,
-                        name = "断开投屏",
-                        detailName = "停止画面镜像并关闭连接",
-                        tint = MaterialTheme.colorScheme.error,
-                        onClick = { controller.stopMirroring() }
-                    )
-                    ToolbarActionItem(
-                        icon = Icons.Default.KeyboardArrowDown,
-                        name = "折叠工具栏",
-                        detailName = "收起工具栏为悬浮小球",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        onClick = { isToolbarExpanded = false }
-                    )
+
+                    if (config.isToolbarDoubleRow) {
+                        val numColumns = maxOf(4, (screenWidthDp - 56) / 44)
+                        val chunks = allButtonsToDisplay.chunked(numColumns)
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 98.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(end = 8.dp, top = 4.dp, bottom = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            chunks.forEach { rowIds ->
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    rowIds.forEach { actionId ->
+                                        RenderToolbarButton(actionId)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(end = 8.dp, top = 4.dp, bottom = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            allButtonsToDisplay.forEach { actionId ->
+                                RenderToolbarButton(actionId)
+                            }
+                        }
+                    }
                 }
             }
-        } else {
+        }
+
+        AnimatedVisibility(
+            visible = !isToolbarExpanded,
+            modifier = Modifier.align(Alignment.BottomEnd),
+            enter = fadeIn(animationSpec = tween(280)) + scaleIn(initialScale = 0.7f, animationSpec = tween(280)),
+            exit = fadeOut(animationSpec = tween(200)) + scaleOut(targetScale = 0.7f, animationSpec = tween(200))
+        ) {
             // Collapsed Floating Mini FAB/Bubble
             Surface(
-                onClick = { isToolbarExpanded = true },
+                onClick = {
+                    isToolbarExpanded = true
+                    controller.updateConfig(config.copy(isToolbarExpanded = true))
+                },
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f),
                 shape = CircleShape,
                 tonalElevation = 8.dp,
                 shadowElevation = 10.dp,
                 modifier = Modifier
-                    .align(Alignment.BottomEnd)
                     .padding(end = 20.dp, bottom = if (isFullscreen) 36.dp else 24.dp)
                     .offset { IntOffset(miniFabOffsetX.roundToInt(), miniFabOffsetY.roundToInt()) }
                     .pointerInput(Unit) {
@@ -2682,6 +2918,7 @@ fun ScrcpyConfigSettingsSection(
     controller: ScrcpyController,
     onQueryCameras: () -> Unit,
     onQueryCameraSizes: () -> Unit,
+    onQueryEncoders: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isCamera = config.videoSource.equals("camera", ignoreCase = true)
@@ -3150,21 +3387,21 @@ fun ScrcpyConfigSettingsSection(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Stay awake toggle (--stay-awake)
+        // Keep active toggle (--keep-active)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("阻止设备休眠", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                Text("投屏或镜头采集期间阻止对端设备进入睡眠休眠状态 (--stay-awake)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("保持设备活跃 (防休眠)", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("投屏或镜头采集期间保持活跃，未插电亦可阻止对端设备休眠 (--keep-active)", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Spacer(modifier = Modifier.width(8.dp))
             Switch(
-                checked = config.isStayAwake,
+                checked = config.isKeepActive,
                 onCheckedChange = { isChecked ->
-                    controller.updateConfig(config.copy(isStayAwake = isChecked))
+                    controller.updateConfig(config.copy(isKeepActive = isChecked))
                 }
             )
         }
@@ -3262,7 +3499,701 @@ fun ScrcpyConfigSettingsSection(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(20.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // =========================================================================
+        // 底部工具栏排布与按键自定义设置 (Toolbar Layout & Button Ordering)
+        // =========================================================================
+        var showButtonOrderDialog by remember { mutableStateOf(false) }
+        val context = LocalContext.current
+
+        Surface(
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "底部工具栏排布与按键自定义",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "支持切换单排横滑或双排紧凑显示，支持调整功能按钮先后顺序，以及隐藏不需要的功能项（自动记住设置）。",
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 1. 排布模式选择 (单排横向 vs 双排上下滑动)
+                Text(
+                    text = "工具栏排布样式",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // 单排横滑
+                    val isSingle = !config.isToolbarDoubleRow
+                    Surface(
+                        onClick = { controller.updateConfig(config.copy(isToolbarDoubleRow = false)) },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isSingle) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isSingle) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 10.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ViewStream,
+                                contentDescription = null,
+                                tint = if (isSingle) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column {
+                                Text(
+                                    text = "单排横滑",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSingle) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "左右滚动浏览",
+                                    fontSize = 10.sp,
+                                    color = if (isSingle) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    // 双排上下滑动
+                    val isDouble = config.isToolbarDoubleRow
+                    Surface(
+                        onClick = { controller.updateConfig(config.copy(isToolbarDoubleRow = true)) },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isDouble) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isDouble) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                        ),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 10.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.GridView,
+                                contentDescription = null,
+                                tint = if (isDouble) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column {
+                                Text(
+                                    text = "双排显示",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isDouble) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "上下滑动出更多",
+                                    fontSize = 10.sp,
+                                    color = if (isDouble) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 2. 按键排序与显示/隐藏入口
+                val currentOrder = config.getEffectiveToolbarOrder()
+                val visibleCount = currentOrder.count { config.isButtonVisible(it) }
+                val hiddenCount = currentOrder.size - visibleCount
+                val isCustomized = config.toolbarButtonOrder.isNotEmpty() || config.toolbarHiddenButtons.isNotEmpty()
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "功能按键排序与可见性",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "共 ${currentOrder.size} 个按键 (已显示 $visibleCount 个, 隐藏 $hiddenCount 个)",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Button(
+                                onClick = { showButtonOrderDialog = true },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("自定义排序", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                if (showButtonOrderDialog) {
+                    ToolbarButtonSortDialog(
+                        config = config,
+                        onUpdateConfig = { newCfg ->
+                            controller.updateConfig(newCfg)
+                        },
+                        onDismiss = { showButtonOrderDialog = false }
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // =========================================================================
+        // 实验性设置 (Experimental Settings) - 放在最后面并标记提示非必要请勿随意修改
+        // =========================================================================
+        Surface(
+            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.18f),
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.35f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "实验性设置",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "实验性设置 (非必要请勿随意修改)",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "⚠️ 以下参数为高级底层实验性项。设备默认配置通常最优，非必要请勿随意修改！修改编码器或过大缓冲可能导致投屏画面黑屏、崩溃或增加操作延迟。",
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // -------------------------------------------------------------
+                // 1. 视频编码器选择 (scrcpy --video-encoder)
+                // -------------------------------------------------------------
+                Text(
+                    text = "1. 视频编码器 (scrcpy --video-encoder)",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "设备上可能存在多个编码器。默认编码器异常崩溃或产生画面异常时，可通过以下按钮查询并切换其他硬件或软件编码器。",
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Display current encoder status
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "当前选用编码器",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = if (config.videoEncoder.isBlank()) "系统默认 (由 scrcpy 自动决策)" else config.videoEncoder,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                fontFamily = if (config.videoEncoder.isBlank()) FontFamily.Default else FontFamily.Monospace,
+                                color = if (config.videoEncoder.isBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                        }
+                        if (config.videoEncoder.isNotBlank()) {
+                            TextButton(
+                                onClick = {
+                                    controller.updateConfig(config.copy(videoEncoder = ""))
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("恢复默认", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Query and Choose Encoders button
+                OutlinedButton(
+                    onClick = onQueryEncoders,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("查询并选择编码器 (--list-encoders)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // -------------------------------------------------------------
+                // 2. 视频缓冲 (scrcpy --video-buffer)
+                // -------------------------------------------------------------
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "2. 视频缓冲 (scrcpy --video-buffer)",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "默认不对视频进行缓冲以获取超低延迟。若网络不稳定或画面偶有卡顿抖动，可开启缓冲以延迟画面并补偿抖动，获得更平滑的播放体验。",
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = config.isVideoBufferEnabled,
+                        onCheckedChange = { isChecked ->
+                            controller.updateConfig(config.copy(isVideoBufferEnabled = isChecked))
+                        }
+                    )
+                }
+
+                if (config.isVideoBufferEnabled) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "缓冲时长滑杆调节 (10ms ~ 200ms)",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "${config.videoBufferMs} ms",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            Slider(
+                                value = config.videoBufferMs.toFloat().coerceIn(10f, 200f),
+                                onValueChange = { newValue ->
+                                    val rounded = ((newValue / 5).toInt() * 5).coerceIn(10, 200)
+                                    controller.updateConfig(config.copy(videoBufferMs = rounded))
+                                },
+                                valueRange = 10f..200f,
+                                steps = 37
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("10ms (极低延迟)", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("50ms (推荐)", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                Text("200ms (强抗抖动)", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Quick preset chips
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(10, 50, 120).forEach { ms ->
+                                    val isSel = config.videoBufferMs == ms
+                                    FilterChip(
+                                        selected = isSel,
+                                        onClick = { controller.updateConfig(config.copy(videoBufferMs = ms)) },
+                                        label = { Text("${ms}ms", fontSize = 11.sp) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+@Composable
+fun EncoderSelectionDialog(
+    currentEncoder: String,
+    isQuerying: Boolean,
+    encoders: List<ScrcpyController.ScrcpyEncoderInfo>,
+    rawOutput: String,
+    onSelectEncoder: (ScrcpyController.ScrcpyEncoderInfo?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var showRawText by remember { mutableStateOf(false) }
+    var customEncoderInput by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Tune,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "选择视频编码器 (--list-encoders)",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 440.dp)
+            ) {
+                Text(
+                    text = "默认编码器有时会出现异常崩溃。优先选择带有【硬件加速】标签的编码器，以获得最高性能与低发热。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+
+                if (isQuerying) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text("正在通过 ADB 查询被控端编码器...", fontSize = 13.sp)
+                    }
+                } else if (showRawText) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                    ) {
+                        Text(
+                            text = rawOutput.ifBlank { "未查询到原始输出" },
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            modifier = Modifier
+                                .verticalScroll(rememberScrollState())
+                                .padding(10.dp)
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 1. System Default Option
+                        item {
+                            val isDefaultSelected = currentEncoder.isBlank()
+                            Surface(
+                                onClick = { onSelectEncoder(null) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isDefaultSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                border = if (isDefaultSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isDefaultSelected,
+                                        onClick = { onSelectEncoder(null) }
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = "系统默认 (推荐)",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 14.sp
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.primary,
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "AUTO",
+                                                    color = MaterialTheme.colorScheme.onPrimary,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "由 scrcpy 根据设备型号与 Codec 自动选定最佳编码器",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Detected Encoders
+                        val videoEncoders = encoders.filter { it.isVideo }
+                        val displayEncoders = if (videoEncoders.isNotEmpty()) videoEncoders else encoders
+                        items(displayEncoders) { enc ->
+                            val isSelected = currentEncoder.equals(enc.name, ignoreCase = true)
+                            Surface(
+                                onClick = { onSelectEncoder(enc) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { onSelectEncoder(enc) }
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.secondary,
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = enc.codec.uppercase(),
+                                                    color = MaterialTheme.colorScheme.onSecondary,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                            Surface(
+                                                color = if (enc.isHardware) Color(0xFF2E7D32).copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceTint.copy(alpha = 0.15f),
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = if (enc.isHardware) "硬件加速" else "软件解码",
+                                                    color = if (enc.isHardware) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = enc.name,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Manual Input Item
+                        item {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text("手动指定编码器名称:", fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        OutlinedTextField(
+                                            value = customEncoderInput,
+                                            onValueChange = { customEncoderInput = it.trim() },
+                                            placeholder = { Text("例如 OMX.qcom.video.encoder.avc", fontSize = 11.sp) },
+                                            singleLine = true,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Button(
+                                            onClick = {
+                                                if (customEncoderInput.isNotBlank()) {
+                                                    val dummyCodec = when {
+                                                        customEncoderInput.contains("hevc", ignoreCase = true) || customEncoderInput.contains("h265", ignoreCase = true) -> "h265"
+                                                        customEncoderInput.contains("av01", ignoreCase = true) || customEncoderInput.contains("av1", ignoreCase = true) -> "av1"
+                                                        else -> "h264"
+                                                    }
+                                                    onSelectEncoder(ScrcpyController.ScrcpyEncoderInfo(dummyCodec, customEncoderInput, isHardware = true, isVideo = true))
+                                                }
+                                            },
+                                            enabled = customEncoderInput.isNotBlank(),
+                                            contentPadding = PaddingValues(horizontal = 10.dp)
+                                        ) {
+                                            Text("应用", fontSize = 12.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!isQuerying && rawOutput.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TextButton(
+                        onClick = { showRawText = !showRawText },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text(if (showRawText) "返回选择列表" else "查看原始 ADB 输出", fontSize = 11.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                if (!isQuerying && rawOutput.isNotBlank()) {
+                    TextButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("scrcpy-encoders", rawOutput)
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(context, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("复制")
+                    }
+                }
+                Button(onClick = onDismiss) {
+                    Text("关闭")
+                }
+            }
+        }
+    )
 }
 
 @Composable
@@ -3275,6 +4206,8 @@ fun ScrcpyServerComponentCard(
     val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
     val serverState by ScrcpyServerManager.state.collectAsState()
     var proxyDropdownExpanded by remember { mutableStateOf(false) }
+    var versionDropdownExpanded by remember { mutableStateOf(false) }
+    var versionDialogVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         ScrcpyServerManager.init(context)
@@ -3378,7 +4311,8 @@ fun ScrcpyServerComponentCard(
                     // Details
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             text = "本地状态: ${if (serverState.isReady) "已就绪 (${serverState.localVersion ?: ""}, ${ScrcpyServerManager.formatSize(serverState.localFileSize)})" else "未下载"}",
@@ -3391,6 +4325,171 @@ fun ScrcpyServerComponentCard(
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Target Version Selector Section
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "下载目标版本 (支持任意特定版本):",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        TextButton(
+                            onClick = { versionDialogVisible = true },
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                        ) {
+                            Icon(Icons.Default.FormatListBulleted, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("版本列表 (${serverState.availableVersions.size})", fontSize = 12.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { versionDropdownExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Default.Sell,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    val targetVer = serverState.selectedTargetVersion ?: serverState.latestVersion ?: if (serverState.availableVersions.isNotEmpty()) serverState.availableVersions.first().version else "未选择 (需拉取)"
+                                    Text(
+                                        text = "版本: $targetVer",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    if (targetVer == serverState.latestVersion && serverState.latestVersion != null) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                "最新",
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                    if (targetVer == serverState.localVersion && serverState.isReady) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            color = Color(0xFF2E7D32).copy(alpha = 0.15f),
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                "当前已就绪",
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF2E7D32),
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = versionDropdownExpanded,
+                            onDismissRequest = { versionDropdownExpanded = false },
+                            modifier = Modifier.heightIn(max = 320.dp)
+                        ) {
+                            serverState.availableVersions.forEach { verInfo ->
+                                val isSelected = verInfo.version == serverState.selectedTargetVersion
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = verInfo.version,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                    fontSize = 13.sp,
+                                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                )
+                                                if (verInfo.isLatest) {
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Surface(
+                                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                                        shape = RoundedCornerShape(4.dp)
+                                                    ) {
+                                                        Text(
+                                                            "最新",
+                                                            fontSize = 9.sp,
+                                                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                        )
+                                                    }
+                                                }
+                                                if (verInfo.version == serverState.localVersion && serverState.isReady) {
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Surface(
+                                                        color = Color(0xFF2E7D32).copy(alpha = 0.15f),
+                                                        shape = RoundedCornerShape(4.dp)
+                                                    ) {
+                                                        Text(
+                                                            "当前使用",
+                                                            fontSize = 9.sp,
+                                                            color = Color(0xFF2E7D32),
+                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            val details = listOfNotNull(
+                                                verInfo.note.ifEmpty { null },
+                                                verInfo.publishedAt.ifEmpty { null },
+                                                verInfo.sizeFormatted.ifEmpty { null }
+                                            ).joinToString(" · ")
+                                            if (details.isNotEmpty()) {
+                                                Text(
+                                                    text = details,
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        ScrcpyServerManager.selectTargetVersion(context, verInfo.version)
+                                        versionDropdownExpanded = false
+                                    }
+                                )
+                            }
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.FormatListBulleted, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("查看完整版本列表 / 下载指定版本...", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                },
+                                onClick = {
+                                    versionDropdownExpanded = false
+                                    versionDialogVisible = true
+                                }
                             )
                         }
                     }
@@ -3462,7 +4561,7 @@ fun ScrcpyServerComponentCard(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = "下载中: ${(serverState.downloadProgress * 100).toInt()}%",
+                                    text = "下载中: ${(serverState.downloadProgress * 100).toInt()}% (${serverState.downloadingVersion ?: serverState.selectedTargetVersion ?: ""})",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
@@ -3537,12 +4636,17 @@ fun ScrcpyServerComponentCard(
                                     color = MaterialTheme.colorScheme.onPrimary
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("下载中...", fontSize = 12.sp)
+                                val dVer = serverState.downloadingVersion ?: serverState.selectedTargetVersion ?: ""
+                                Text("下载中 $dVer...", fontSize = 12.sp)
                             } else {
                                 Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
+                                val targetVer = serverState.selectedTargetVersion ?: serverState.latestVersion ?: "最新"
+                                val isInstalledThis = serverState.isReady && serverState.localVersion == targetVer
                                 Text(
-                                    if (!serverState.isReady) "从 GitHub 下载" else "更新/重新下载",
+                                    text = if (!serverState.isReady) "下载 $targetVer"
+                                           else if (isInstalledThis) "重新下载 $targetVer"
+                                           else "下载并切换到 $targetVer",
                                     fontSize = 12.sp
                                 )
                             }
@@ -3565,5 +4669,591 @@ fun ScrcpyServerComponentCard(
             }
         }
     }
+
+    if (versionDialogVisible) {
+        ScrcpyVersionSelectionDialog(
+            serverState = serverState,
+            onDismiss = { versionDialogVisible = false },
+            onSelectVersion = { ver ->
+                ScrcpyServerManager.selectTargetVersion(context, ver)
+            },
+            onDownloadVersion = { ver, url ->
+                coroutineScope.launch {
+                    ScrcpyServerManager.downloadServer(context, ver, url)
+                }
+            },
+            onCheckUpdate = {
+                coroutineScope.launch {
+                    ScrcpyServerManager.checkUpdate(context)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun ScrcpyVersionSelectionDialog(
+    serverState: ScrcpyServerState,
+    onDismiss: () -> Unit,
+    onSelectVersion: (String) -> Unit,
+    onDownloadVersion: (String, String?) -> Unit,
+    onCheckUpdate: () -> Unit
+) {
+    var customTag by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onCheckUpdate,
+                enabled = !serverState.isCheckingUpdate && !serverState.isDownloading
+            ) {
+                if (serverState.isCheckingUpdate) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
+                Text("检查更新/刷新", fontSize = 12.sp)
+            }
+        },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.FormatListNumbered,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "选择 scrcpy-server 版本",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 440.dp)
+            ) {
+                Text(
+                    text = "从 GitHub Releases 网络动态拉取 >= 4.1 的版本列表。点击版本项可设为目标版本，或点击右侧按钮直接下载。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Custom version input
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = customTag,
+                        onValueChange = { customTag = it },
+                        placeholder = { Text("手动输入版本号 (如 v4.1)", fontSize = 12.sp) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Button(
+                        onClick = {
+                            val tag = customTag.trim()
+                            if (tag.isNotEmpty()) {
+                                onSelectVersion(if (tag.startsWith("v") || tag.startsWith("V")) tag else "v$tag")
+                                customTag = ""
+                            }
+                        },
+                        enabled = customTag.isNotBlank(),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text("指定", fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                if (serverState.availableVersions.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "暂无已拉取的 >= 4.1 版本",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "请点击下方「检查更新/刷新」从 GitHub 网络拉取",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(serverState.availableVersions) { verInfo ->
+                        val isSelected = verInfo.version == serverState.selectedTargetVersion
+                        val isLocalInstalled = verInfo.version == serverState.localVersion && serverState.isReady
+                        val isCurrentlyDownloading = serverState.isDownloading && serverState.downloadingVersion == verInfo.version
+
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelectVersion(verInfo.version) },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+                                     else BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = verInfo.version,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        if (verInfo.isLatest) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.primary,
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    "最新",
+                                                    fontSize = 9.sp,
+                                                    color = MaterialTheme.colorScheme.onPrimary,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                        if (isLocalInstalled) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                color = Color(0xFF2E7D32),
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    "当前已装",
+                                                    fontSize = 9.sp,
+                                                    color = Color.White,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    val desc = listOfNotNull(
+                                        verInfo.releaseName.ifEmpty { null },
+                                        verInfo.note.ifEmpty { null },
+                                        verInfo.publishedAt.ifEmpty { null },
+                                        verInfo.sizeFormatted.ifEmpty { null }
+                                    ).distinct().joinToString(" · ")
+                                    if (desc.isNotEmpty()) {
+                                        Text(
+                                            text = desc,
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(8.dp))
+
+                                Button(
+                                    onClick = {
+                                        onSelectVersion(verInfo.version)
+                                        onDownloadVersion(verInfo.version, verInfo.downloadUrl)
+                                    },
+                                    enabled = !serverState.isDownloading,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    if (isCurrentlyDownloading) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(12.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.onPrimary
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("下载中", fontSize = 11.sp)
+                                    } else {
+                                        Icon(
+                                            Icons.Default.CloudDownload,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text(
+                                            text = if (isLocalInstalled) "重下" else "下载",
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+)
+}
+
+fun getToolbarButtonIcon(actionId: String): androidx.compose.ui.graphics.vector.ImageVector {
+    return when (actionId) {
+        "back" -> Icons.Default.ArrowBack
+        "home" -> Icons.Default.Home
+        "recents" -> Icons.Default.RecentActors
+        "wake_up" -> Icons.Default.LockOpen
+        "orientation" -> Icons.Default.ScreenRotation
+        "multi_touch" -> Icons.Default.TouchApp
+        "keep_active", "stay_awake" -> Icons.Default.WbSunny
+        "text_input" -> Icons.Default.Keyboard
+        "screen_off" -> Icons.Default.ScreenLockPortrait
+        "volume_down" -> Icons.Default.VolumeDown
+        "volume_up" -> Icons.Default.VolumeUp
+        "volume_panel" -> Icons.Default.GraphicEq
+        "audio_stream" -> Icons.Default.Headphones
+        "virtual_display" -> Icons.Default.Apps
+        "logs" -> Icons.Default.Terminal
+        "settings" -> Icons.Default.Settings
+        "fullscreen" -> Icons.Default.Fullscreen
+        "disconnect" -> Icons.Default.PowerSettingsNew
+        "collapse" -> Icons.Default.KeyboardArrowDown
+        else -> Icons.Default.Tune
+    }
+}
+
+@Composable
+fun ToolbarButtonSortDialog(
+    config: ScrcpyConfig,
+    onUpdateConfig: (ScrcpyConfig) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var buttonOrderList by remember { mutableStateOf(config.getEffectiveToolbarOrder()) }
+    var hiddenButtonsSet by remember { mutableStateOf(config.toolbarHiddenButtons) }
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Tune,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            )
+        },
+        title = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = "底部工具栏按键排序与显示",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "点击 ▲▼ 调整顺序，置顶可移至首位，取消勾选隐藏",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+            ) {
+                // 顶部统计与快捷操作栏 (全部显示 / 恢复默认)
+                val visibleCount = buttonOrderList.count { it !in hiddenButtonsSet }
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "已启用 $visibleCount / ${buttonOrderList.size} 个按键",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (hiddenButtonsSet.isNotEmpty()) {
+                                TextButton(
+                                    onClick = { hiddenButtonsSet = emptySet() },
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("全部显示", fontSize = 11.sp)
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    buttonOrderList = DEFAULT_TOOLBAR_BUTTON_IDS
+                                    hiddenButtonsSet = emptySet()
+                                    Toast.makeText(context, "已重置为默认按键排序与全显示", Toast.LENGTH_SHORT).show()
+                                },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(13.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("重置默认", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // 按键列表
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    itemsIndexed(buttonOrderList, key = { _, id -> id }) { index, actionId ->
+                        val meta = TOOLBAR_BUTTON_METAS.find { it.id == actionId }
+                        val name = meta?.name ?: actionId
+                        val detail = meta?.detail ?: ""
+                        val isVisible = actionId !in hiddenButtonsSet
+                        val icon = getToolbarButtonIcon(actionId)
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isVisible) {
+                                MaterialTheme.colorScheme.surface
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            },
+                            border = BorderStroke(
+                                1.dp,
+                                if (isVisible) MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 序号标签
+                                Text(
+                                    text = "${index + 1}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isVisible) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                    modifier = Modifier.width(20.dp)
+                                )
+
+                                // 图标圆底
+                                Surface(
+                                    shape = CircleShape,
+                                    color = if (isVisible) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = icon,
+                                            contentDescription = name,
+                                            tint = if (isVisible) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(6.dp))
+
+                                // 名称与描述
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = name,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isVisible) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        )
+                                        if (!isVisible) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "已隐藏",
+                                                    fontSize = 9.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        text = detail,
+                                        fontSize = 10.sp,
+                                        maxLines = 1,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isVisible) 0.8f else 0.5f)
+                                    )
+                                }
+
+                                // 置顶按钮
+                                Surface(
+                                    onClick = {
+                                        if (index > 0) {
+                                            val mutable = buttonOrderList.toMutableList()
+                                            val item = mutable.removeAt(index)
+                                            mutable.add(0, item)
+                                            buttonOrderList = mutable
+                                        }
+                                    },
+                                    enabled = index > 0,
+                                    color = if (index > 0) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f) else Color.Transparent,
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.height(26.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier.padding(horizontal = 6.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "置顶",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (index > 0) MaterialTheme.colorScheme.onSecondaryContainer else Color.Transparent
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(2.dp))
+
+                                // 上移按钮
+                                IconButton(
+                                    onClick = {
+                                        if (index > 0) {
+                                            val mutable = buttonOrderList.toMutableList()
+                                            val temp = mutable[index]
+                                            mutable[index] = mutable[index - 1]
+                                            mutable[index - 1] = temp
+                                            buttonOrderList = mutable
+                                        }
+                                    },
+                                    enabled = index > 0,
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowUp,
+                                        contentDescription = "上移",
+                                        tint = if (index > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                // 下移按钮
+                                IconButton(
+                                    onClick = {
+                                        if (index < buttonOrderList.size - 1) {
+                                            val mutable = buttonOrderList.toMutableList()
+                                            val temp = mutable[index]
+                                            mutable[index] = mutable[index + 1]
+                                            mutable[index + 1] = temp
+                                            buttonOrderList = mutable
+                                        }
+                                    },
+                                    enabled = index < buttonOrderList.size - 1,
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "下移",
+                                        tint = if (index < buttonOrderList.size - 1) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(2.dp))
+
+                                // 显示/隐藏开关 Checkbox
+                                Checkbox(
+                                    checked = isVisible,
+                                    onCheckedChange = { checked ->
+                                        hiddenButtonsSet = if (checked) {
+                                            hiddenButtonsSet - actionId
+                                        } else {
+                                            hiddenButtonsSet + actionId
+                                        }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val updatedCfg = config.copy(
+                        toolbarButtonOrder = buttonOrderList.joinToString(","),
+                        toolbarHiddenButtons = hiddenButtonsSet
+                    )
+                    onUpdateConfig(updatedCfg)
+                    Toast.makeText(context, "工具栏按键设置已保存", Toast.LENGTH_SHORT).show()
+                    onDismiss()
+                }
+            ) {
+                Text("保存设置")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
