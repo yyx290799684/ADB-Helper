@@ -32,13 +32,13 @@ jobs:
         fi
         chmod +x gradlew
 
-    # 1. 恢复或生成固定的签名密钥，并复制到根目录
+    # 1. 恢复或生成固定的签名密钥（注意别名已改成 upload 契合项目配置）
     - name: Restore KeyStore from Cache
       id: keystore-cache
       uses: actions/cache@v4
       with:
         path: ~/.android/adbhelper-release.jks
-        key: adbhelper-fixed-keystore-v1
+        key: adbhelper-fixed-keystore-v2
 
     - name: Prepare Signing Key
       run: |
@@ -46,10 +46,10 @@ jobs:
         KEYSTORE_PATH="$HOME/.android/adbhelper-release.jks"
         
         if [ ! -f "$KEYSTORE_PATH" ]; then
-          echo "Generating new persistent release keystore..."
+          echo "Generating new persistent release keystore with alias 'upload'..."
           keytool -genkeypair -v \
             -keystore "$KEYSTORE_PATH" \
-            -alias adbhelper \
+            -alias upload \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
@@ -61,12 +61,12 @@ jobs:
         cp "$KEYSTORE_PATH" ./my-upload-key.jks
         echo "Successfully placed my-upload-key.jks in root directory."
 
-    # 2. 编译 Release APK，并直接通过环境变量注入 Gradle 签名所需的密码
+    # 2. 编译 Release APK，传入对应的环境变量
     - name: Build Release APK
       run: ./gradlew assembleRelease
       env:
         STORE_PASSWORD: adbhelper123
-        KEY_ALIAS: adbhelper
+        KEY_ALIAS: upload
         KEY_PASSWORD: adbhelper123
 
     # 3. 自动提取 versionName 并发布 Release
@@ -74,7 +74,7 @@ jobs:
       run: |
         VERSION_NAME=$(grep "versionName" app/build.gradle.kts | head -n 1 | sed -E 's/.*versionName[[:space:]]*=[[:space:]]*["\x27]([^"\x27]+)["\x27].*/\1/')
         
-        if [ -z "$VERSION_NAME" ] || [ "$VERSION_NAME" = "app/build.gradle.kts" ]; then
+        if [ -z "$VERSION_NAME" ] \vert{}\vert{} [ "$VERSION_NAME" = "app/build.gradle.kts" ]; then
           VERSION_NAME="1.1.${{ github.run_number }}"
         fi
         
@@ -89,7 +89,7 @@ jobs:
         name: ADB-Helper v${{ env.VERSION_NAME }}
         body: |
           ### 🚀 自动构建版本 v${{ env.VERSION_NAME }}
-          - 密码环境变量已注入
+          - 别名已适配项目 `upload` 配置
           - 已启用云端密钥缓存，支持无缝覆盖升级
         draft: false
         prerelease: false
