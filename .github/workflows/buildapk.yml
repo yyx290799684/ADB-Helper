@@ -1,50 +1,95 @@
-name: Android Release Build
+name: Build and Release Android APK
 
 on:
-  workflow_dispatch:
   push:
-    tags:
-      - 'v*'
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Set up JDK 17          # 注意：你 sourceCompatibility 是 11，用 17 编译没问题；若想严格用 11 可改成 '11'
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
 
-      - name: Decode Keystore
-        run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "${{ github.workspace }}/release-key.jks"
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
 
-      - name: Build Release APK
-        env:
-          # 这三个名字必须和 build.gradle.kts 里 System.getenv(...) 完全一致
-          KEYSTORE_PATH: ${{ github.workspace }}/release-key.jks
-          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          chmod +x ./gradlew
-          ./gradlew assembleRelease
+    - name: Generate Gradle Wrapper
+      run: |
+        if [ ! -f "gradlew" ]; then
+          gradle wrapper
+        fi
+        chmod +x gradlew
 
-      - name: Upload APK (Artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-${{ github.sha }}
-          path: app/build/outputs/apk/release/*.apk
+    # 1. 恢复或生成固定的签名密钥（注意别名已改成 upload 契合项目配置）
+    - name: Restore KeyStore from Cache
+      id: keystore-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.android/adbhelper-release.jks
+        key: adbhelper-fixed-keystore-v2
 
-      - name: Create Release and Attach APK
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: app/build/outputs/apk/release/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Prepare Signing Key
+      run: |
+        mkdir -p ~/.android
+        KEYSTORE_PATH="$HOME/.android/adbhelper-release.jks"
+        
+        if [ ! -f "$KEYSTORE_PATH" ]; then
+          echo "Generating new persistent release keystore with alias 'upload'..."
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_PATH" \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass adbhelper123 \
+            -keypass adbhelper123 \
+            -dname "CN=ADB Helper, OU=Dev, O=ADB Helper, L=Hangzhou, ST=Zhejiang, C=CN"
+        fi
+        
+        cp "$KEYSTORE_PATH" ./my-upload-key.jks
+        echo "Successfully placed my-upload-key.jks in root directory."
+
+    # 2. 编译 Release APK，传入对应的环境变量
+    - name: Build Release APK
+      run: ./gradlew assembleRelease
+      env:
+        STORE_PASSWORD: adbhelper123
+        KEY_ALIAS: upload
+        KEY_PASSWORD: adbhelper123
+
+    # 3. 自动提取 versionName 并发布 Release
+    - name: Extract Version and Release
+      run: |
+        VERSION_NAME=$(grep "versionName" app/build.gradle.kts | head -n 1 | sed -E 's/.*versionName[[:space:]]*=[[:space:]]*["\x27]([^"\x27]+)["\x27].*/\1/')
+        
+        if [ -z "$VERSION_NAME" ] \vert{}\vert{} [ "$VERSION_NAME" = "app/build.gradle.kts" ]; then
+          VERSION_NAME="1.1.${{ github.run_number }}"
+        fi
+        
+        echo "Extracted App Version: $VERSION_NAME"
+        echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+
+    - name: Publish GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: app/build/outputs/apk/release/*.apk
+        tag_name: v${{ env.VERSION_NAME }}
+        name: ADB-Helper v${{ env.VERSION_NAME }}
+        body: |
+          ### 🚀 自动构建版本 v${{ env.VERSION_NAME }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
