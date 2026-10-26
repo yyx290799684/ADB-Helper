@@ -21,6 +21,7 @@ class WidgetActionReceiver : BroadcastReceiver() {
         const val ACTION_WIDGET_CONNECT_DEVICE = "com.yangyx.adbhelper.widget.ACTION_CONNECT_DEVICE"
         const val ACTION_WIDGET_DISCONNECT = "com.yangyx.adbhelper.widget.ACTION_DISCONNECT"
         const val ACTION_WIDGET_EXECUTE_ACTION = "com.yangyx.adbhelper.widget.ACTION_EXECUTE_ACTION"
+        const val ACTION_WIDGET_START_SCAN = "com.yangyx.adbhelper.widget.ACTION_START_SCAN"
 
         const val EXTRA_DEVICE_IP = "extra_device_ip"
         const val EXTRA_DEVICE_PORT = "extra_device_port"
@@ -40,6 +41,9 @@ class WidgetActionReceiver : BroadcastReceiver() {
                 when (action) {
                     ACTION_WIDGET_QUICK_CONNECT -> {
                         showToast(context, "正在后台发起连接常用设备...")
+                        WidgetStateHolder.onConnecting("常用设备", "")
+                        WidgetUpdateHelper.updateAllWidgets(context)
+                        com.yangyx.adbhelper.service.AdbSessionService.startConnectingService(context, "常用设备")
                         val app = context.applicationContext as Application
                         val vm = AdbViewModel.getOrCreate(app)
                         vm.connectLatestDevice()
@@ -48,8 +52,12 @@ class WidgetActionReceiver : BroadcastReceiver() {
                     ACTION_WIDGET_CONNECT_DEVICE -> {
                         val ip = intent.getStringExtra(EXTRA_DEVICE_IP) ?: ""
                         val port = intent.getIntExtra(EXTRA_DEVICE_PORT, 5555)
-                        val name = intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "ADB 设备"
+                        val rawName = intent.getStringExtra(EXTRA_DEVICE_NAME) ?: ""
                         val serial = intent.getStringExtra(EXTRA_DEVICE_SERIAL) ?: ""
+
+                        val isAddressOnly = rawName.isBlank() || rawName.contains(":") || rawName.startsWith("开放")
+                        val displayTitle = if (isAddressOnly) "$ip:$port" else rawName
+                        val passDeviceName = if (isAddressOnly) "" else rawName
 
                         try {
                             val db = com.yangyx.adbhelper.data.AppDatabase.getDatabase(context)
@@ -61,21 +69,24 @@ class WidgetActionReceiver : BroadcastReceiver() {
                                 }
                             } else {
                                 val existing = db.deviceDao().getDeviceByIpAndPort(ip, port)
-                                if (existing != null) {
+                                if (existing != null && !existing.name.startsWith("开放")) {
                                     db.deviceDao().insertOrUpdateDevice(existing.copy(lastConnectedTime = now))
                                 }
                             }
                         } catch (_: Exception) {}
 
-                        WidgetStateHolder.onConnecting(name, if (ip.isNotBlank()) "$ip:$port" else "")
+                        WidgetStateHolder.onConnecting(displayTitle, "$ip:$port")
                         WidgetUpdateHelper.updateAllWidgets(context)
 
-                        showToast(context, "正在后台连接设备: $name...")
+                        showToast(context, "正在连接 $displayTitle ...")
+                        // 启动前台服务保活，避免在依次探测多个 IP 时被系统杀死或挂起
+                        com.yangyx.adbhelper.service.AdbSessionService.startConnectingService(context, displayTitle)
+
                         val app = context.applicationContext as Application
                         val vm = AdbViewModel.getOrCreate(app)
                         vm.connectDeviceSmart(
                             serialNo = serial,
-                            deviceName = name,
+                            deviceName = passDeviceName,
                             fallbackIp = ip,
                             fallbackPort = port
                         )
@@ -97,6 +108,69 @@ class WidgetActionReceiver : BroadcastReceiver() {
                     ACTION_WIDGET_EXECUTE_ACTION -> {
                         val actionId = intent.getStringExtra(EXTRA_ACTION_ID) ?: ""
                         executeWidgetAction(context, actionId)
+                    }
+
+                    ACTION_WIDGET_START_SCAN -> {
+                        showToast(context, "正在后台扫描局域网 ADB 设备...")
+                        WidgetStateHolder.onScanStarted()
+                        WidgetUpdateHelper.updateAllWidgets(context)
+
+                        // 启动保活前台服务，防止扫描局域网时被系统休眠或冻结
+                        com.yangyx.adbhelper.service.AdbSessionService.startService(
+                            context,
+                            "局域网扫描",
+                            "正在探测开放 5555 端口的设备..."
+                        )
+
+                        try {
+                            val db = com.yangyx.adbhelper.data.AppDatabase.getDatabase(context)
+                            try {
+                                db.deviceDao().deletePlaceholderDevices()
+                            } catch (_: Exception) {}
+
+                            val scanner = com.yangyx.adbhelper.adb.LanScanner()
+                            val discovered = scanner.scanLanForAdbDevices(
+                                ports = listOf(5555),
+                                timeoutMs = 300
+                            )
+
+                            val now = System.currentTimeMillis()
+                            val mappedList = mutableListOf<WidgetDeviceInfo>()
+
+                            for (d in discovered) {
+                                mappedList.add(
+                                    WidgetDeviceInfo(
+                                        name = "${d.ip}:${d.port}",
+                                        ip = d.ip,
+                                        port = d.port,
+                                        serialNo = "",
+                                        lastConnectedTime = now,
+                                        ipCount = 1
+                                    )
+                                )
+                            }
+
+                            WidgetStateHolder.onScanFinished(
+                                devices = mappedList,
+                                progressText = if (mappedList.isNotEmpty()) "发现 ${mappedList.size} 台设备" else "未发现新设备"
+                            )
+                            WidgetUpdateHelper.saveScannedDevicesToCache(context, mappedList)
+
+                            if (mappedList.isNotEmpty()) {
+                                showToast(context, "扫描完成，发现 ${mappedList.size} 台设备")
+                            } else {
+                                showToast(context, "扫描完成，未找到开放 5555 端口的设备")
+                            }
+                        } catch (e: Exception) {
+                            WidgetStateHolder.onScanFinished(emptyList(), "扫描出错: ${e.message}")
+                            showToast(context, "扫描出错: ${e.message}")
+                        } finally {
+                            val hasActive = WidgetStateHolder.activeConnection?.isConnected == true
+                            if (!hasActive) {
+                                com.yangyx.adbhelper.service.AdbSessionService.stopService(context)
+                            }
+                            WidgetUpdateHelper.updateAllWidgets(context)
+                        }
                     }
                 }
             } finally {

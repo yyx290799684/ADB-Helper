@@ -42,6 +42,10 @@ class AdbSessionService : Service() {
             }
         }
 
+        fun startConnectingService(context: Context, deviceName: String) {
+            startService(context, deviceName, "正在依次探测与连接...")
+        }
+
         fun stopService(context: Context) {
             try {
                 val intent = Intent(context, AdbSessionService::class.java).apply {

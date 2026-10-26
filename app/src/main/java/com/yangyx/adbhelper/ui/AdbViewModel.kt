@@ -314,17 +314,43 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
-        withoutSerial.forEach { device ->
+        withoutSerial.groupBy {
+            when {
+                it.aliasName.isNotBlank() -> "alias_${it.aliasName}"
+                it.name.isNotBlank() -> "name_${it.name}"
+                else -> "ip_${it.ipAddress}_${it.port}_${it.id}"
+            }
+        }.forEach { (groupKey, list) ->
+            val isManual = isGroupManuallyOrdered(
+                groupKey = groupKey,
+                serialNo = "",
+                ipRecords = list
+            )
+            val sortedIps = if (isManual) {
+                list.sortedBy { it.sortOrder }
+            } else {
+                list.sortedWith(
+                    compareBy<DeviceEntity> { it.sortOrder }
+                        .thenByDescending { it.lastConnectedTime }
+                )
+            }
+            val bestName = sortedIps.firstOrNull { it.name.isNotBlank() }?.name ?: "Android 设备 (${sortedIps.first().ipAddress})"
+            val bestModel = sortedIps.firstOrNull { it.model.isNotBlank() }?.model ?: ""
+            val bestAlias = sortedIps.firstOrNull { it.aliasName.isNotBlank() }?.aliasName ?: ""
+            val bestIcon = sortedIps.firstOrNull { it.iconType.isNotBlank() }?.iconType ?: "phone"
+            val latestTime = sortedIps.maxOfOrNull { it.lastConnectedTime } ?: 0L
+
             groups.add(
                 GroupedDevice(
-                    key = "ip_${device.ipAddress}_${device.port}_${device.id}",
+                    key = groupKey,
                     serialNo = "",
-                    deviceName = if (device.name.isNotBlank()) device.name else "Android 设备 (${device.ipAddress})",
-                    model = device.model,
-                    aliasName = device.aliasName,
-                    iconType = if (device.iconType.isNotBlank()) device.iconType else "phone",
-                    lastConnectedTime = device.lastConnectedTime,
-                    ipRecords = listOf(device)
+                    deviceName = bestName,
+                    model = bestModel,
+                    aliasName = bestAlias,
+                    iconType = bestIcon,
+                    lastConnectedTime = latestTime,
+                    ipRecords = sortedIps,
+                    isManuallyOrdered = isManual
                 )
             )
         }
@@ -758,8 +784,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         WidgetStateHolder.onConnecting()
                     }
                     is ConnectionState.Disconnected, is ConnectionState.Error -> {
-                        WidgetStateHolder.onDisconnected()
-                        autoStartMirrorOnConnect = false
+                        if (WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING && activeConnectJob?.isActive != true) {
+                            WidgetStateHolder.onDisconnected()
+                            autoStartMirrorOnConnect = false
+                            if (_sessions.value.isEmpty()) {
+                                com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+                            }
+                        }
                     }
                 }
                 WidgetUpdateHelper.updateAllWidgets(getApplication())
@@ -774,7 +805,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 } else if (sessionList.isNotEmpty()) {
                     val first = sessionList.first()
                     WidgetStateHolder.onConnected(first, first.deviceName, "${first.ip}:${first.port}", sessionList.size)
-                } else if (_connectionState.value !is ConnectionState.Connecting) {
+                } else if (_connectionState.value !is ConnectionState.Connecting && WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING && activeConnectJob?.isActive != true) {
                     WidgetStateHolder.onDisconnected()
                 }
                 WidgetUpdateHelper.updateAllWidgets(getApplication())
@@ -1547,6 +1578,11 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 _connectionState.value = ConnectionState.Error(e.message ?: "连接超时或拒绝连接")
+                WidgetStateHolder.onDisconnected()
+                WidgetUpdateHelper.updateAllWidgets(getApplication())
+                if (_sessions.value.isEmpty()) {
+                    com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+                }
             } finally {
                 if (pendingAttemptConnection == conn) {
                     pendingAttemptConnection = null
@@ -1688,6 +1724,11 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
             if (!isConnected) {
                 _connectionState.value = ConnectionState.Error("设备 [$displayName] 的所有 $total 个历史 IP 均无法连通，请确认手机已开启无线调试并与本机在同一局域网。")
+                WidgetStateHolder.onDisconnected()
+                WidgetUpdateHelper.updateAllWidgets(getApplication())
+                if (_sessions.value.isEmpty()) {
+                    com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+                }
             }
         }
     }

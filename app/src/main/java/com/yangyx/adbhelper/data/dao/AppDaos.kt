@@ -41,6 +41,9 @@ interface DeviceDao {
     @Query("DELETE FROM devices WHERE serialNo = :serialNo AND serialNo != ''")
     suspend fun deleteDevicesBySerialNo(serialNo: String)
 
+    @Query("DELETE FROM devices WHERE name LIKE '%开放 ADB%' OR name LIKE '%开放ADB%'")
+    suspend fun deletePlaceholderDevices()
+
     @Update
     suspend fun updateDevice(device: DeviceEntity)
 

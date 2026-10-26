@@ -184,6 +184,10 @@ class MainActivity : ComponentActivity() {
                         WidgetUpdateHelper.ACTION_WIDGET_OPEN_DEVICE -> {
                             isViewingHomeScreen = false
                         }
+                        WidgetUpdateHelper.ACTION_WIDGET_START_SCAN -> {
+                            isViewingHomeScreen = true
+                            viewModel.startLanScan()
+                        }
                     }
                     pendingIntentAction = null
                 }

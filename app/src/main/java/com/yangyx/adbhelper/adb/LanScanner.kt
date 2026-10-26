@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger
 data class DiscoveredAdbDevice(
     val ip: String,
     val port: Int = 5555,
-    val deviceName: String = "局域网 ADB 设备",
+    val deviceName: String = "",
     val isOnline: Boolean = true
 )
 
@@ -102,7 +102,7 @@ class LanScanner {
                                 val discovered = DiscoveredAdbDevice(
                                     ip = ip,
                                     port = port,
-                                    deviceName = "开放 ADB 设备 ($ip)"
+                                    deviceName = "$ip:$port"
                                 )
                                 if (!discoveredList.any { it.ip == ip && it.port == port }) {
                                     discoveredList.add(discovered)

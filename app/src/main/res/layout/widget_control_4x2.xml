@@ -39,10 +39,34 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginStart="5dp"
-                    android:text="快速连接设备"
+                    android:text="ADB 助手"
                     android:textColor="@color/widget_text_primary"
                     android:textSize="11sp"
                     android:textStyle="bold" />
+
+                <!-- Status Dot & Text for Disconnected / Connecting state -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="end|center_vertical">
+
+                    <ImageView
+                        android:id="@+id/iv_status_dot_disconnected_4x2"
+                        android:layout_width="6dp"
+                        android:layout_height="6dp"
+                        android:src="@drawable/widget_status_dot_disconnected"
+                        android:contentDescription="Status Dot" />
+
+                    <TextView
+                        android:id="@+id/tv_status_text_disconnected_4x2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="3dp"
+                        android:text="未连接"
+                        android:textColor="@color/widget_text_secondary"
+                        android:textSize="9sp" />
+                </LinearLayout>
             </LinearLayout>
 
             <!-- Device Item 1 -->
@@ -412,20 +436,383 @@
         android:background="@color/widget_card_stroke"
         android:contentDescription="@null" />
 
-    <!-- Right Panel: 4 Configurable Action Tiles in 2x2 Grid (Weight 5.8) -->
-    <LinearLayout
+    <!-- Right Panel (Weight 5.8): Disconnected LAN Scan Panel OR Connected 4 Action Tiles -->
+    <FrameLayout
         android:id="@+id/layout_right_panel"
         android:layout_width="0dp"
         android:layout_height="match_parent"
-        android:layout_weight="5.8"
-        android:orientation="vertical">
+        android:layout_weight="5.8">
 
-        <!-- Grid Row 1 (Tile 1 + Tile 2) -->
+        <!-- Case 1: Disconnected State - LAN Device Scanning Panel -->
         <LinearLayout
+            android:id="@+id/layout_disconnected_scan_4x2"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:orientation="horizontal">
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:background="@drawable/widget_tile_bg"
+            android:padding="8dp"
+            android:visibility="visible">
+
+            <!-- Scan Header -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <ImageView
+                    android:id="@+id/iv_scan_header_icon"
+                    android:layout_width="15dp"
+                    android:layout_height="15dp"
+                    android:src="@drawable/ic_widget_refresh"
+                    android:contentDescription="Scan Icon" />
+
+                <TextView
+                    android:id="@+id/tv_scan_header_title"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:text="局域网扫描"
+                    android:textColor="@color/widget_text_primary"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tv_scan_header_badge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/widget_item_bg"
+                    android:paddingHorizontal="4dp"
+                    android:paddingVertical="1dp"
+                    android:text="5555端口"
+                    android:textColor="@color/widget_accent"
+                    android:textSize="8sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Description / Hint -->
+            <TextView
+                android:id="@+id/tv_scan_header_desc"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="探测当前 Wi-Fi 网段内所有开启无线调试的设备"
+                android:textColor="@color/widget_text_secondary"
+                android:textSize="9sp"
+                android:singleLine="true"
+                android:ellipsize="end" />
+
+            <!-- Subview 1: Idle / Scanning State Body -->
+            <LinearLayout
+                android:id="@+id/layout_scan_idle_4x2"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:visibility="visible">
+
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <!-- Buttons Row -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <!-- Primary LAN Scan Button -->
+                    <LinearLayout
+                        android:id="@+id/btn_scan_lan_4x2"
+                        android:layout_width="0dp"
+                        android:layout_height="28dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/widget_primary_btn_bg"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:orientation="horizontal"
+                        android:paddingHorizontal="6dp">
+
+                        <ImageView
+                            android:id="@+id/iv_scan_btn_icon"
+                            android:layout_width="12dp"
+                            android:layout_height="12dp"
+                            android:src="@drawable/ic_widget_scan"
+                            android:contentDescription="Scan" />
+
+                        <TextView
+                            android:id="@+id/tv_scan_btn_text"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="4dp"
+                            android:text="开始扫描"
+                            android:textColor="@color/widget_white"
+                            android:textSize="10sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <!-- Wireless Pair / Add Button -->
+                    <LinearLayout
+                        android:id="@+id/btn_pair_device_4x2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="28dp"
+                        android:layout_marginStart="6dp"
+                        android:background="@drawable/widget_item_bg"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:orientation="horizontal"
+                        android:paddingHorizontal="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="配对新设备"
+                            android:textColor="@color/widget_text_secondary"
+                            android:textSize="9sp" />
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Subview 2: Scan Results State Body (Discovered Devices List) -->
+            <LinearLayout
+                android:id="@+id/layout_scan_results_4x2"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <!-- Scanned Device Item 1 -->
+                <LinearLayout
+                    android:id="@+id/item_scanned_1_4x2"
+                    android:layout_width="match_parent"
+                    android:layout_height="22dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@drawable/widget_item_bg"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="6dp">
+
+                    <ImageView
+                        android:layout_width="5dp"
+                        android:layout_height="5dp"
+                        android:src="@drawable/widget_status_dot_connected"
+                        android:contentDescription="Online" />
+
+                    <TextView
+                        android:id="@+id/tv_scanned_name_1_4x2"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="5dp"
+                        android:text="192.168.1.100:5555"
+                        android:textColor="@color/widget_text_primary"
+                        android:textSize="10sp"
+                        android:textStyle="bold"
+                        android:singleLine="true"
+                        android:ellipsize="end" />
+
+                    <TextView
+                        android:id="@+id/tv_scanned_action_1_4x2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="28dp"
+                        android:gravity="center"
+                        android:includeFontPadding="false"
+                        android:text="连接"
+                        android:textColor="@color/widget_accent"
+                        android:textSize="9sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Scanned Device Item 2 -->
+                <LinearLayout
+                    android:id="@+id/item_scanned_2_4x2"
+                    android:layout_width="match_parent"
+                    android:layout_height="22dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@drawable/widget_item_bg"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="6dp">
+
+                    <ImageView
+                        android:layout_width="5dp"
+                        android:layout_height="5dp"
+                        android:src="@drawable/widget_status_dot_connected"
+                        android:contentDescription="Online" />
+
+                    <TextView
+                        android:id="@+id/tv_scanned_name_2_4x2"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="5dp"
+                        android:text="192.168.1.101:5555"
+                        android:textColor="@color/widget_text_primary"
+                        android:textSize="10sp"
+                        android:textStyle="bold"
+                        android:singleLine="true"
+                        android:ellipsize="end" />
+
+                    <TextView
+                        android:id="@+id/tv_scanned_action_2_4x2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="28dp"
+                        android:gravity="center"
+                        android:includeFontPadding="false"
+                        android:text="连接"
+                        android:textColor="@color/widget_accent"
+                        android:textSize="9sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Scanned Device Item 3 -->
+                <LinearLayout
+                    android:id="@+id/item_scanned_3_4x2"
+                    android:layout_width="match_parent"
+                    android:layout_height="22dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@drawable/widget_item_bg"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="6dp">
+
+                    <ImageView
+                        android:layout_width="5dp"
+                        android:layout_height="5dp"
+                        android:src="@drawable/widget_status_dot_connected"
+                        android:contentDescription="Online" />
+
+                    <TextView
+                        android:id="@+id/tv_scanned_name_3_4x2"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="5dp"
+                        android:text="192.168.1.102:5555"
+                        android:textColor="@color/widget_text_primary"
+                        android:textSize="10sp"
+                        android:textStyle="bold"
+                        android:singleLine="true"
+                        android:ellipsize="end" />
+
+                    <TextView
+                        android:id="@+id/tv_scanned_action_3_4x2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="28dp"
+                        android:gravity="center"
+                        android:includeFontPadding="false"
+                        android:text="连接"
+                        android:textColor="@color/widget_accent"
+                        android:textSize="9sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Empty Hint (Shown when 0 devices found) -->
+                <TextView
+                    android:id="@+id/tv_scanned_empty_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:gravity="center"
+                    android:text="未发现开启 5555 端口的设备\n请确认被控端已开启无线调试"
+                    android:textColor="@color/widget_text_secondary"
+                    android:textSize="9sp"
+                    android:visibility="gone" />
+
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <!-- Bottom Rescan & Pair Action Row -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <LinearLayout
+                        android:id="@+id/btn_rescan_4x2"
+                        android:layout_width="0dp"
+                        android:layout_height="24dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/widget_primary_btn_bg"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:orientation="horizontal"
+                        android:paddingHorizontal="6dp">
+
+                        <ImageView
+                            android:layout_width="10dp"
+                            android:layout_height="10dp"
+                            android:src="@drawable/ic_widget_scan"
+                            android:contentDescription="Rescan" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="3dp"
+                            android:text="重新扫描"
+                            android:textColor="@color/widget_white"
+                            android:textSize="9sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:id="@+id/btn_pair_rescan_4x2"
+                        android:layout_width="wrap_content"
+                        android:layout_height="24dp"
+                        android:layout_marginStart="6dp"
+                        android:background="@drawable/widget_item_bg"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center"
+                        android:orientation="horizontal"
+                        android:paddingHorizontal="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="配对新设备"
+                            android:textColor="@color/widget_text_secondary"
+                            android:textSize="9sp" />
+                    </LinearLayout>
+                </LinearLayout>
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- Case 2: Connected State - 4 Configurable Action Tiles in 2x2 Grid -->
+        <LinearLayout
+            android:id="@+id/layout_connected_actions_4x2"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <!-- Grid Row 1 (Tile 1 + Tile 2) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:orientation="horizontal">
 
             <!-- Tile 1 -->
             <LinearLayout
@@ -618,7 +1005,7 @@
                 </LinearLayout>
             </LinearLayout>
         </LinearLayout>
-
     </LinearLayout>
+</FrameLayout>
 
 </LinearLayout>

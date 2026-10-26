@@ -27,9 +27,26 @@ object WidgetStateHolder {
         CONNECTED
     }
 
+    enum class ScanState {
+        IDLE,
+        SCANNING,
+        FINISHED
+    }
+
     @Volatile
     var currentState: State = State.DISCONNECTED
         private set
+
+    @Volatile
+    var scanState: ScanState = ScanState.IDLE
+        private set
+
+    @Volatile
+    var scanProgressText: String = ""
+        private set
+
+    @Volatile
+    var scannedDevices: List<WidgetDeviceInfo> = emptyList()
 
     @Volatile
     var deviceName: String = ""
@@ -79,5 +96,22 @@ object WidgetStateHolder {
             deviceName = name
             deviceIp = ip
         }
+    }
+
+    fun onScanStarted() {
+        scanState = ScanState.SCANNING
+        scanProgressText = "正在扫描局域网..."
+    }
+
+    fun onScanFinished(devices: List<WidgetDeviceInfo>, progressText: String) {
+        scanState = ScanState.FINISHED
+        scannedDevices = devices
+        scanProgressText = progressText
+    }
+
+    fun resetScanState() {
+        scanState = ScanState.IDLE
+        scanProgressText = ""
+        scannedDevices = emptyList()
     }
 }

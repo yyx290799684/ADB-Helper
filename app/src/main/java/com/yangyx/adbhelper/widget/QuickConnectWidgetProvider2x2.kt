@@ -31,6 +31,7 @@ class QuickConnectWidgetProvider2x2 : AppWidgetProvider() {
         try {
             appWidgetManager.updateAppWidget(ComponentName(context, QuickConnectWidgetProvider2x2::class.java), views)
         } catch (_: Exception) {}
+        WidgetUpdateHelper.updateAllWidgets(context)
     }
 
     override fun onReceive(context: Context, intent: Intent) {

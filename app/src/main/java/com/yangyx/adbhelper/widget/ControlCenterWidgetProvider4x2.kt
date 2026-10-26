@@ -31,6 +31,7 @@ class ControlCenterWidgetProvider4x2 : AppWidgetProvider() {
         try {
             appWidgetManager.updateAppWidget(ComponentName(context, ControlCenterWidgetProvider4x2::class.java), views)
         } catch (_: Exception) {}
+        WidgetUpdateHelper.updateAllWidgets(context)
     }
 
     override fun onReceive(context: Context, intent: Intent) {

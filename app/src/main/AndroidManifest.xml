@@ -108,6 +108,7 @@
                 <action android:name="com.yangyx.adbhelper.widget.ACTION_CONNECT_DEVICE" />
                 <action android:name="com.yangyx.adbhelper.widget.ACTION_DISCONNECT" />
                 <action android:name="com.yangyx.adbhelper.widget.ACTION_EXECUTE_ACTION" />
+                <action android:name="com.yangyx.adbhelper.widget.ACTION_START_SCAN" />
             </intent-filter>
         </receiver>
     </application>
