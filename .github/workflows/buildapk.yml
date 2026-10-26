@@ -80,7 +80,7 @@ jobs:
           CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%an)" --no-merges)
         else
           CHANGELOG=$(git log -n 10 --pretty=format:"- %s (%an)" --no-merges)
-        }
+        fi
 
         if [ -z "$CHANGELOG" ]; then
           CHANGELOG="- 持续集成构建与常规更新。"
