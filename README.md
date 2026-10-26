@@ -14,6 +14,9 @@
   <img src="https://img.shields.io/badge/UI-Jetpack%20Compose%20(M3)-purple.svg" alt="Jetpack Compose" />
   <img src="https://img.shields.io/badge/Architecture-MVVM%20%2B%20Coroutines-orange.svg" alt="Architecture" />
   <img src="https://img.shields.io/badge/License-Apache%202.0-lightgrey.svg" alt="License" />
+  <a href="https://github.com/yyx290799684/ADB-Helper/releases">
+    <img src="https://github.com/yyx290799684/ADB-Helper/actions/workflows/buildapk.yml/badge.svg" alt="Build and Release Android APK"/>
+  </a>
 </p>
 
 ---
