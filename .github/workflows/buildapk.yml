@@ -3,7 +3,14 @@ name: Build and Release Android APK
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
+    paths:
+      - 'app/**'          # 只有 app 目录下的文件变动才触发
+      - 'gradle/**'       # （可选）如果修改了 Gradle 核心配置也触发
+      - 'build.gradle.kts' # （可选）根目录下的构建文件变动也触发
+      - 'settings.gradle.kts'
+      - '!**.md'          # 排除所有 markdown 文件的修改
+      - '!.github/workflows/**' # 排除仅修改 CI 配置文件本身时触发（防止套娃触发）
+  workflow_dispatch: # 保留手动触发按钮，不受 paths 限制
 
 jobs:
   build:
@@ -69,17 +76,42 @@ jobs:
         KEY_ALIAS: upload
         KEY_PASSWORD: adbhelper123
 
-    # 3. 自动提取 versionName 并发布 Release
-    - name: Extract Version and Release
+    # 3. 自动提取 versionName、生成更新日志并发布 Release
+    - name: Extract Version and Generate Changelog
+      id: changelog
       run: |
+        # 1. 提取版本号
         VERSION_NAME=$(grep "versionName" app/build.gradle.kts | head -n 1 | sed -E 's/.*versionName[[:space:]]*=[[:space:]]*["\x27]([^"\x27]+)["\x27].*/\1/')
         
-        if [ -z "$VERSION_NAME" ] \vert{}\vert{} [ "$VERSION_NAME" = "app/build.gradle.kts" ]; then
+        if [ -z "$VERSION_NAME" ]; then
           VERSION_NAME="1.1.${{ github.run_number }}"
         fi
         
         echo "Extracted App Version: $VERSION_NAME"
         echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+
+        # 2. 获取上一个 Tag，如果没有则获取最近的 10 条提交
+        PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+        
+        echo "Generating changelog..."
+        if [ -n "$PREV_TAG" ]; then
+          # 获取上一个标签到当前的所有 commit message
+          CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%an)" --no-merges)
+        else
+          # 如果没有历史标签，取最近 10 条
+          CHANGELOG=$(git log -n 10 --pretty=format:"- %s (%an)" --no-merges)
+        }
+
+        # 如果没有新的提交说明
+        if [ -z "$CHANGELOG" ]; then
+          CHANGELOG="- 持续集成构建与常规更新。"
+        fi
+
+        # 处理多行文本写入 GITHUB_ENV（GitHub Actions 的标准多行变量写法）
+        delimiter="EOF_CHANGELOG"
+        echo "CHANGELOG<<$delimiter" >> $GITHUB_ENV
+        echo "$CHANGELOG" >> $GITHUB_ENV
+        echo "$delimiter" >> $GITHUB_ENV
 
     - name: Publish GitHub Release
       uses: softprops/action-gh-release@v2
@@ -89,6 +121,12 @@ jobs:
         name: ADB-Helper v${{ env.VERSION_NAME }}
         body: |
           ### 🚀 自动构建版本 v${{ env.VERSION_NAME }}
+
+          #### 📝 更新日志 (Changelog):
+          ${{ env.CHANGELOG }}
+          
+          ---
+          *由 GitHub Actions 自动打包发布*
         draft: false
         prerelease: false
       env:
