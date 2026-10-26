@@ -21,6 +21,7 @@ data class ScrcpyConfig(
     val hostOrientationMode: HostOrientationMode = HostOrientationMode.AUTO, // Orientation strategy
     val virtualDisplayWidth: Int = 0,     // Virtual display width (0 = disabled)
     val virtualDisplayHeight: Int = 0,    // Virtual display height
+    val virtualDisplayDpi: Int = 0,       // Virtual display DPI (0 = auto/native)
     val launchPackageOnVirtualDisplay: String = "", // Package to launch on virtual display
 
     // Video Source & Camera Mirroring Options (Android 12+)

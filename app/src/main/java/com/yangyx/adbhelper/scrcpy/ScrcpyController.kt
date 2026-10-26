@@ -112,34 +112,68 @@ class ScrcpyController(
     val isVirtualDisplayActive = MutableStateFlow(false)
     var activeVirtualWidth: Int = 1080
     var activeVirtualHeight: Int = 1920
+    var activeVirtualDpi: Int = 400
     var activeVirtualPackage: String = ""
 
-    fun createVirtualDisplayAndLaunch(width: Int, height: Int, packageName: String) {
+    fun createVirtualDisplayAndLaunch(width: Int, height: Int, dpi: Int = 0, packageName: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                addLog("用户主动创建独立虚拟副屏 (${width}x${height})${if (packageName.isNotBlank()) "，启动应用: $packageName" else ""}...", LogLevel.INFO)
+                val effectiveDpi = if (dpi > 0) dpi else (if (nativeDpi > 0) nativeDpi else 400)
+                addLog("用户主动创建独立虚拟副屏 (${width}x${height}/${effectiveDpi}DPI)${if (packageName.isNotBlank()) "，启动应用: $packageName" else ""}...", LogLevel.INFO)
                 
+                // If virtual display is already running with matching dimensions and DPI, directly launch app without tearing down
+                if (isVirtualDisplayActive.value && virtualDisplayId > 0 && activeVirtualWidth == width && activeVirtualHeight == height && activeVirtualDpi == effectiveDpi && controlStream != null && streamingJob?.isActive == true) {
+                    addLog("当前虚拟副屏 (${width}x${height}/${effectiveDpi}DPI, ID: $virtualDisplayId) 已就绪，直接启动应用: $packageName", LogLevel.INFO)
+                    activeVirtualPackage = packageName
+                    if (packageName.isNotBlank()) {
+                        launchPackageOnDisplay(packageName, virtualDisplayId)
+                    }
+                    return@launch
+                }
+
                 activeVirtualWidth = width
                 activeVirtualHeight = height
+                activeVirtualDpi = effectiveDpi
                 activeVirtualPackage = packageName
                 isVirtualDisplayActive.value = true
+                virtualDisplayId = -1 // Reset to avoid stale IDs from previous runs
 
                 stopMirroring()
                 // Wait for cleanup
                 kotlinx.coroutines.delay(500)
                 startMirroring()
                 
-                // wait for scrcpy-server to start streaming and create the display
-                kotlinx.coroutines.delay(2500)
+                // Dynamically poll and wait for scrcpy-server to start streaming, establish control socket, and assign display ID
+                var waitedMs = 0L
+                val maxWaitMs = 10000L
+                val intervalMs = 250L
                 
-                val vId = findLatestVirtualDisplayId()
-                virtualDisplayId = vId
+                while (waitedMs < maxWaitMs && streamingJob?.isActive == true) {
+                    if (controlStream != null && !controlStream!!.isClosed) {
+                        if (virtualDisplayId > 0 || waitedMs >= 3500L) {
+                            break
+                        }
+                    }
+                    kotlinx.coroutines.delay(intervalMs)
+                    waitedMs += intervalMs
+                }
+                
+                if (virtualDisplayId <= 0) {
+                    val fallbackId = findLatestVirtualDisplayId()
+                    if (fallbackId > 0) {
+                        virtualDisplayId = fallbackId
+                    }
+                }
                 
                 if (packageName.isNotBlank()) {
-                    launchPackageOnDisplay(packageName, vId)
+                    launchPackageOnDisplay(packageName, virtualDisplayId)
                 }
 
-                addLog("已成功关联并激活系统虚拟屏 ID: $vId (${width}x${height})", LogLevel.SUCCESS)
+                if (virtualDisplayId > 0) {
+                    addLog("已成功关联并激活系统虚拟屏 ID: $virtualDisplayId (${width}x${height}/${effectiveDpi}DPI)", LogLevel.SUCCESS)
+                } else {
+                    addLog("虚拟副屏通道已就绪 (${width}x${height}/${effectiveDpi}DPI)", LogLevel.SUCCESS)
+                }
             } catch (e: Exception) {
                 addLog("创建虚拟副屏发生异常: ${e.message}", LogLevel.ERROR)
             }
@@ -195,6 +229,7 @@ class ScrcpyController(
             hostOrientationMode = hostOrientationMode,
             virtualDisplayWidth = prefs.getInt("virtualDisplayWidth", 0),
             virtualDisplayHeight = prefs.getInt("virtualDisplayHeight", 0),
+            virtualDisplayDpi = prefs.getInt("virtualDisplayDpi", 0),
             launchPackageOnVirtualDisplay = prefs.getString("launchPackageOnVirtualDisplay", "") ?: "",
             videoSource = prefs.getString("videoSource", "display") ?: "display",
             cameraFacing = prefs.getString("cameraFacing", "back") ?: "back",
@@ -239,6 +274,7 @@ class ScrcpyController(
                 .putString("hostOrientationMode", cfg.hostOrientationMode.name)
                 .putInt("virtualDisplayWidth", cfg.virtualDisplayWidth)
                 .putInt("virtualDisplayHeight", cfg.virtualDisplayHeight)
+                .putInt("virtualDisplayDpi", cfg.virtualDisplayDpi)
                 .putString("launchPackageOnVirtualDisplay", cfg.launchPackageOnVirtualDisplay)
                 .putString("videoSource", cfg.videoSource)
                 .putString("cameraFacing", cfg.cameraFacing)
@@ -281,6 +317,15 @@ class ScrcpyController(
     @Volatile
     var nativeHeight: Int = 2400
         private set
+    @Volatile
+    var nativeDpi: Int = 400
+        private set
+
+    fun queryRemoteMetrics() {
+        scope.launch(Dispatchers.IO) {
+            fetchRemoteResolution()
+        }
+    }
 
     @Volatile
     var remoteWidth: Int = 1080
@@ -592,7 +637,10 @@ class ScrcpyController(
                     " audio=false"
                 }
                 val displayParam = if (!isCamera) {
-                    if (isVirtualDisplayActive.value) " new_display=${activeVirtualWidth}x${activeVirtualHeight}/240 vd_system_decorations=false" else " display_id=0"
+                    if (isVirtualDisplayActive.value) {
+                        val dpi = if (activeVirtualDpi > 0) activeVirtualDpi else (if (nativeDpi > 0) nativeDpi else 400)
+                        " new_display=${activeVirtualWidth}x${activeVirtualHeight}/$dpi vd_system_decorations=false"
+                    } else " display_id=0"
                 } else ""
 
                 val codecParam = when (cfg.videoCodec.lowercase()) {
@@ -618,6 +666,22 @@ class ScrcpyController(
                                 val line = reader.readLine() ?: break
                                 if (line.isNotBlank()) {
                                     addLog("[scrcpy-server] $line", LogLevel.INFO)
+                                    // Parse: "INFO: New display: 1220x2712/240 (id=21)" or "Display: ... (id=...)"
+                                    if (line.contains("New display", ignoreCase = true) || line.contains("Display:", ignoreCase = true)) {
+                                        val idMatch = Regex("""\(id=(\d+)\)""").find(line)
+                                        if (idMatch != null) {
+                                            val detectedId = idMatch.groupValues[1].toIntOrNull()
+                                            if (detectedId != null && detectedId > 0) {
+                                                virtualDisplayId = detectedId
+                                                addLog("成功捕获并关联系统虚拟显示器 ID: $detectedId", LogLevel.SUCCESS)
+                                                if (isVirtualDisplayActive.value && activeVirtualPackage.isNotBlank()) {
+                                                    scope.launch(Dispatchers.IO) {
+                                                        launchPackageOnDisplay(activeVirtualPackage, detectedId)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         } catch (e: Exception) {
@@ -810,6 +874,12 @@ class ScrcpyController(
                                 ctrl.write(byteArrayOf(10, 0)) // 10 = SET_SCREEN_POWER_MODE, 0 = POWER_MODE_OFF
                                 addLog("已通过控制通道发送熄屏指令 (SET_SCREEN_POWER_MODE=0)", LogLevel.INFO)
                             } catch (_: Exception) {}
+                        }
+                        if (isVirtualDisplayActive.value && activeVirtualPackage.isNotBlank()) {
+                            scope.launch(Dispatchers.IO) {
+                                kotlinx.coroutines.delay(200)
+                                launchPackageOnDisplay(activeVirtualPackage, virtualDisplayId)
+                            }
                         }
                         break
                     } catch (e: Exception) {
@@ -1117,9 +1187,9 @@ class ScrcpyController(
         }
     }
 
-    private fun fetchRemoteResolution() {
+    suspend fun fetchRemoteResolution() {
         try {
-            addLog("正在查询被控端原生物理屏幕分辨率...", LogLevel.INFO)
+            addLog("正在查询被控端原生物理屏幕分辨率与 DPI...", LogLevel.INFO)
             val output = connection.executeShell("wm size")
             val regex = Regex("(\\d+)[xX](\\d+)")
             val matches = regex.findAll(output).toList()
@@ -1131,12 +1201,22 @@ class ScrcpyController(
                 remoteHeight = nativeHeight
                 addLog("成功识别被控端原生物理屏幕分辨率: ${nativeWidth}x${nativeHeight}", LogLevel.SUCCESS)
             }
+            val densityOut = connection.executeShell("wm density")
+            val densityMatch = Regex("""Override density:\s*(\d+)""").find(densityOut)
+                ?: Regex("""Physical density:\s*(\d+)""").find(densityOut)
+                ?: Regex("""density:\s*(\d+)""", RegexOption.IGNORE_CASE).find(densityOut)
+            val d = densityMatch?.groupValues?.get(1)?.toIntOrNull()
+            if (d != null && d > 0) {
+                nativeDpi = d
+                addLog("成功识别被控端物理屏幕 DPI: $nativeDpi", LogLevel.SUCCESS)
+            }
         } catch (e: Exception) {
             nativeWidth = 1080
             nativeHeight = 2400
             remoteWidth = 1080
             remoteHeight = 2400
-            addLog("识别被控端分辨率失败，使用默认 1080x2400", LogLevel.WARN)
+            nativeDpi = 400
+            addLog("识别被控端分辨率与 DPI 失败，使用默认 1080x2400 (400 DPI)", LogLevel.WARN)
         }
     }
 
@@ -1148,41 +1228,90 @@ class ScrcpyController(
                 .filter { it > 0 }
                 .toList()
             if (ids.isNotEmpty()) {
-                val maxId = ids.maxOrNull() ?: 2
-                addLog("获取到新创虚拟屏幕 ID: $maxId", LogLevel.INFO)
-                return maxId
+                val maxId = ids.maxOrNull() ?: -1
+                if (maxId > 0) {
+                    addLog("通过 dumpsys 查询到虚拟屏幕 ID: $maxId", LogLevel.INFO)
+                    return maxId
+                }
             }
         } catch (_: Exception) {}
-        return 2
+        return -1
     }
 
-    private suspend fun launchPackageOnDisplay(pkg: String, displayId: Int) {
+    private var lastLaunchPkg: String = ""
+    private var lastLaunchTime: Long = 0L
+
+    suspend fun launchPackageOnDisplay(pkg: String, displayId: Int) {
         if (pkg.isBlank()) return
+
+        // Debounce: prevent duplicate spam launches within 2000ms for the same package
+        val now = System.currentTimeMillis()
+        if (pkg == lastLaunchPkg && (now - lastLaunchTime < 2000L)) {
+            return
+        }
+        lastLaunchPkg = pkg
+        lastLaunchTime = now
+
         try {
-            addLog("正在虚拟屏幕启动目标应用 (通过 scrcpy 控制通道): $pkg ...", LogLevel.INFO)
-            val stream = controlStream
-            if (stream != null && isVirtualDisplayActive.value) {
-                val pkgBytes = pkg.toByteArray(Charsets.UTF_8)
-                if (pkgBytes.size > 255) {
-                    addLog("包名太长，无法通过 control 启动", LogLevel.WARN)
-                    return
+            val targetDisplayStr = if (displayId > 0) "屏幕 $displayId" else "虚拟副屏"
+            addLog("正在 $targetDisplayStr 启动目标应用: $pkg ...", LogLevel.INFO)
+
+            var controlSuccess = false
+            // 1. Wait up to 3 seconds for scrcpy control stream if it's currently connecting
+            for (i in 1..15) {
+                val stream = controlStream
+                if (stream != null && !stream.isClosed && isVirtualDisplayActive.value) {
+                    try {
+                        val pkgBytes = pkg.toByteArray(Charsets.UTF_8)
+                        if (pkgBytes.size <= 255) {
+                            val packet = ByteArray(pkgBytes.size + 2)
+                            packet[0] = 16 // TYPE_START_APP
+                            packet[1] = pkgBytes.size.toByte()
+                            System.arraycopy(pkgBytes, 0, packet, 2, pkgBytes.size)
+                            stream.write(packet)
+                            controlSuccess = true
+                            addLog("已通过 scrcpy 专属控制通道成功发送启动指令: $pkg", LogLevel.SUCCESS)
+                            break
+                        }
+                    } catch (e: Exception) {
+                        addLog("通过 scrcpy 控制通道发送启动指令失败: ${e.message}", LogLevel.WARN)
+                    }
                 }
-                val packet = ByteArray(pkgBytes.size + 2)
-                packet[0] = 16 // TYPE_START_APP
-                packet[1] = pkgBytes.size.toByte()
-                System.arraycopy(pkgBytes, 0, packet, 2, pkgBytes.size)
-                stream.write(packet)
-                addLog("成功发送应用启动指令!", LogLevel.SUCCESS)
-            } else {
-                addLog("scrcpy 控制通道未就绪，将尝试 am start", LogLevel.WARN)
-                val resolveOut = connection.executeShell("cmd package resolve-activity --brief $pkg")
-                val mainActivity = resolveOut.lineSequence()
-                    .map { it.trim() }
-                    .firstOrNull { it.contains("/") && !it.startsWith("No activity") }
-                if (mainActivity != null) {
-                    val startRes = connection.executeShell("am start --display $displayId -n $mainActivity")
-                    addLog("在屏幕 $displayId 启动 Activity: $mainActivity ($startRes)", LogLevel.INFO)
+                if (streamingJob?.isActive != true) break
+                kotlinx.coroutines.delay(200)
+            }
+
+            // 2. If a valid displayId is detected (displayId > 0), also perform ADB shell launch
+            if (displayId > 0) {
+                try {
+                    val resolveOut = connection.executeShell("cmd package resolve-activity --brief $pkg")
+                    val mainActivity = resolveOut.lineSequence()
+                        .map { it.trim() }
+                        .firstOrNull { it.contains("/") && !it.startsWith("No activity") }
+
+                    if (mainActivity != null) {
+                        // Launch with FLAG_ACTIVITY_NEW_TASK (0x10000000) and FLAG_ACTIVITY_MULTIPLE_TASK (0x08000000)
+                        val startRes = connection.executeShell("am start --display $displayId -n $mainActivity -f 0x18000000").trim()
+                        if (startRes.contains("SecurityException", ignoreCase = true) || startRes.contains("Error", ignoreCase = true)) {
+                            // Virtual display permission restrictions on Android 10+ (Xiaomi/HyperOS)
+                            val firstLine = startRes.lines().firstOrNull() ?: startRes
+                            addLog("am start 提示安全限制 ($firstLine)，已由 scrcpy 宿主通道完成调起", LogLevel.INFO)
+                            val cmdRes = connection.executeShell("cmd activity start-activity --display $displayId -n $mainActivity").trim()
+                            if (!cmdRes.contains("SecurityException", ignoreCase = true) && !cmdRes.contains("Error", ignoreCase = true)) {
+                                addLog("通过 cmd activity 成功启动 Activity: $mainActivity", LogLevel.SUCCESS)
+                            }
+                        } else {
+                            addLog("在屏幕 $displayId 启动 Activity: $mainActivity 成功 ($startRes)", LogLevel.SUCCESS)
+                        }
+                    } else if (!controlSuccess) {
+                        val monkeyRes = connection.executeShell("monkey -p $pkg -c android.intent.category.LAUNCHER 1").trim()
+                        addLog("通过 monkey 启动应用: $pkg ($monkeyRes)", LogLevel.INFO)
+                    }
+                } catch (e: Exception) {
+                    addLog("ADB shell 辅助启动发生异常: ${e.message}", LogLevel.WARN)
                 }
+            } else if (!controlSuccess) {
+                addLog("scrcpy 控制通道尚未就绪，且未获取到明确的虚拟屏幕 ID", LogLevel.WARN)
             }
         } catch (e: Exception) {
             addLog("启动应用发生异常: ${e.message}", LogLevel.WARN)

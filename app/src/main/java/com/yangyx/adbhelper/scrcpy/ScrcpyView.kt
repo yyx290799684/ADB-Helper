@@ -48,6 +48,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.geometry.Offset
@@ -1120,11 +1122,17 @@ fun ScrcpyView(
 
         if (showVirtualDisplayDialog) {
             val isVirtualActive by controller.isVirtualDisplayActive.collectAsState()
-            var vWidth by remember { mutableStateOf(if (config.virtualDisplayWidth > 0) config.virtualDisplayWidth.toString() else "1080") }
-            var vHeight by remember { mutableStateOf(if (config.virtualDisplayHeight > 0) config.virtualDisplayHeight.toString() else "1920") }
+            val defaultDpi = if (config.virtualDisplayDpi > 0) config.virtualDisplayDpi else (if (controller.nativeDpi > 0) controller.nativeDpi else 400)
+            var vWidth by remember { mutableStateOf(if (config.virtualDisplayWidth > 0) config.virtualDisplayWidth.toString() else (if (controller.nativeWidth > 0) controller.nativeWidth.toString() else "1080")) }
+            var vHeight by remember { mutableStateOf(if (config.virtualDisplayHeight > 0) config.virtualDisplayHeight.toString() else (if (controller.nativeHeight > 0) controller.nativeHeight.toString() else "2400")) }
+            var vDpi by remember { mutableStateOf(defaultDpi.toString()) }
             var pkgName by remember { mutableStateOf(config.launchPackageOnVirtualDisplay) }
             var selectedAppName by remember { mutableStateOf("") }
             var showAppPickerModal by remember { mutableStateOf(false) }
+
+            LaunchedEffect(Unit) {
+                controller.queryRemoteMetrics()
+            }
 
             AlertDialog(
                 onDismissRequest = { showVirtualDisplayDialog = false },
@@ -1138,27 +1146,62 @@ fun ScrcpyView(
                 text = {
                     Column {
                         Text(
-                            text = if (isVirtualActive) "当前模式: 运行独立虚拟屏 (${controller.activeVirtualWidth}x${controller.activeVirtualHeight})" else "当前模式: 被控端物理主屏幕",
+                            text = if (isVirtualActive) "当前模式: 运行独立虚拟副屏 (${controller.activeVirtualWidth}x${controller.activeVirtualHeight}/${controller.activeVirtualDpi}DPI)" else "当前模式: 被控端物理主屏幕",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = if (isVirtualActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             OutlinedTextField(
                                 value = vWidth,
-                                onValueChange = { vWidth = it },
-                                label = { Text("宽度 (px)") },
+                                onValueChange = { vWidth = it.filter { ch -> ch.isDigit() } },
+                                label = { Text("宽度 (px)", fontSize = 11.sp) },
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier.weight(1f)
                             )
                             OutlinedTextField(
                                 value = vHeight,
-                                onValueChange = { vHeight = it },
-                                label = { Text("高度 (px)") },
+                                onValueChange = { vHeight = it.filter { ch -> ch.isDigit() } },
+                                label = { Text("高度 (px)", fontSize = 11.sp) },
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = vDpi,
+                                onValueChange = { vDpi = it.filter { ch -> ch.isDigit() } },
+                                label = { Text("DPI 密度", fontSize = 11.sp) },
+                                placeholder = { Text("如 400", fontSize = 11.sp) },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedButton(
+                            onClick = {
+                                val w = if (controller.nativeWidth > 0) controller.nativeWidth else 1080
+                                val h = if (controller.nativeHeight > 0) controller.nativeHeight else 2400
+                                val d = if (controller.nativeDpi > 0) controller.nativeDpi else 400
+                                vWidth = w.toString()
+                                vHeight = h.toString()
+                                vDpi = d.toString()
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth().height(36.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                "一键带入被控端实际参数 (${controller.nativeWidth}x${controller.nativeHeight}, ${controller.nativeDpi} DPI)",
+                                fontSize = 11.sp,
+                                maxLines = 1
                             )
                         }
 
@@ -1249,16 +1292,18 @@ fun ScrcpyView(
                     ) {
                         Button(
                             onClick = {
-                                val w = vWidth.toIntOrNull() ?: 1080
-                                val h = vHeight.toIntOrNull() ?: 1920
+                                val w = vWidth.toIntOrNull() ?: (if (controller.nativeWidth > 0) controller.nativeWidth else 1080)
+                                val h = vHeight.toIntOrNull() ?: (if (controller.nativeHeight > 0) controller.nativeHeight else 2400)
+                                val d = vDpi.toIntOrNull() ?: (if (controller.nativeDpi > 0) controller.nativeDpi else 400)
                                 controller.updateConfig(
                                     config.copy(
                                         virtualDisplayWidth = w,
                                         virtualDisplayHeight = h,
+                                        virtualDisplayDpi = d,
                                         launchPackageOnVirtualDisplay = pkgName
                                     )
                                 )
-                                controller.createVirtualDisplayAndLaunch(w, h, pkgName)
+                                controller.createVirtualDisplayAndLaunch(w, h, d, pkgName)
                                 showVirtualDisplayDialog = false
                             },
                             shape = RoundedCornerShape(12.dp),
@@ -3191,8 +3236,14 @@ fun ScrcpyConfigSettingsSection(
             Spacer(modifier = Modifier.height(14.dp))
         } else {
             // Display Specific Resolution Settings
+            val isPresetRes = config.maxResolution in listOf(480, 720, 1080, 0)
+            val currentResDisplay = when {
+                config.maxResolution == 0 -> "原生"
+                config.maxResolution in listOf(480, 720, 1080) -> "${config.maxResolution}p"
+                else -> "${config.maxResolution} (自定义 --max-size)"
+            }
             Text(
-                text = "画面传输分辨率: ${if (config.maxResolution == 0) "原生" else "${config.maxResolution}p"}",
+                text = "画面传输分辨率: $currentResDisplay",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium
             )
@@ -3225,6 +3276,56 @@ fun ScrcpyConfigSettingsSection(
                     }
                 }
             }
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Custom Resolution Input Field on a new line
+            var customResInput by remember(config.maxResolution) {
+                mutableStateOf(if (!isPresetRes && config.maxResolution > 0) config.maxResolution.toString() else "")
+            }
+
+            OutlinedTextField(
+                value = customResInput,
+                onValueChange = { newVal ->
+                    val filtered = newVal.filter { it.isDigit() }.take(5)
+                    customResInput = filtered
+                    val parsed = filtered.toIntOrNull()
+                    if (parsed != null && parsed > 0) {
+                        controller.updateConfig(config.copy(maxResolution = parsed))
+                    }
+                },
+                label = { Text("自定义长边分辨率 (--max-size)", fontSize = 11.sp) },
+                placeholder = { Text("输入数字，如 1440, 1600, 2400 (0为原生)", fontSize = 11.sp) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = if (!isPresetRes) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                },
+                trailingIcon = {
+                    if (customResInput.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                customResInput = ""
+                                controller.updateConfig(config.copy(maxResolution = 1080))
+                            },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "清除",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            )
             Spacer(modifier = Modifier.height(14.dp))
         }
 
