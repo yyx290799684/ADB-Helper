@@ -77,9 +77,9 @@ jobs:
         PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
         
         if [ -n "$PREV_TAG" ]; then
-          CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%an)" --no-merges)
+          CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --no-merges)
         else
-          CHANGELOG=$(git log -n 10 --pretty=format:"- %s (%an)" --no-merges)
+          CHANGELOG=$(git log -n 10 --pretty=format:"- %s" --no-merges)
         fi
 
         if [ -z "$CHANGELOG" ]; then
