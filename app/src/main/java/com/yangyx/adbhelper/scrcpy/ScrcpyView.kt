@@ -23,6 +23,9 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.clickable
@@ -1596,14 +1599,45 @@ private fun StreamingViewContent(
     var miniFabOffsetY by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
 
+    var isTopBarDimmed by remember { mutableStateOf(false) }
+    var lastTopBarInteractionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    var isToolbarDimmed by remember { mutableStateOf(false) }
+    var lastToolbarInteractionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
     // 投屏连接成功后，过 5 秒自动将上方的分辨率、帧率悬浮窗收起为小胶囊（用户手动再次展开后同样在 5 秒无操作后自动折叠）
-    LaunchedEffect(isTopBarExpanded) {
+    // 缩小后，若 10 秒无操作，透明度渐变降至 60%；点击、拖动或操作后恢复
+    LaunchedEffect(isTopBarExpanded, lastTopBarInteractionTime) {
         if (isTopBarExpanded) {
+            isTopBarDimmed = false
             kotlinx.coroutines.delay(5000L)
             isTopBarExpanded = false
             controller.updateConfig(config.copy(isTopBarExpanded = false))
+        } else {
+            isTopBarDimmed = false
+            kotlinx.coroutines.delay(10000L)
+            isTopBarDimmed = true
         }
     }
+
+    val topBarAlpha by animateFloatAsState(
+        targetValue = if (isTopBarDimmed) 0.6f else 1.0f,
+        animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing),
+        label = "TopBarAlphaAnimation"
+    )
+
+    // 底部工具栏：无操作 15 秒后透明度改成 60%（渐变动画），点击、拖动或操作后恢复
+    LaunchedEffect(lastToolbarInteractionTime) {
+        isToolbarDimmed = false
+        kotlinx.coroutines.delay(15000L)
+        isToolbarDimmed = true
+    }
+
+    val toolbarAlpha by animateFloatAsState(
+        targetValue = if (isToolbarDimmed) 0.6f else 1.0f,
+        animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing),
+        label = "ToolbarAlphaAnimation"
+    )
 
     val activity = context as? Activity
     val isRemoteLandscape = state.width > state.height && state.width > 0 && state.height > 0
@@ -1782,11 +1816,23 @@ private fun StreamingViewContent(
                 .align(Alignment.TopCenter)
                 .padding(top = if (isFullscreen) 24.dp else 10.dp)
                 .offset { IntOffset(topBarOffsetX.roundToInt(), topBarOffsetY.roundToInt()) }
+                .graphicsLayer { alpha = topBarAlpha }
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent(PointerEventPass.Initial)
+                            lastTopBarInteractionTime = System.currentTimeMillis()
+                            isTopBarDimmed = false
+                        }
+                    }
+                }
                 .pointerInput(Unit) {
                     detectDragGesturesAfterLongPress { change, dragAmount ->
                         change.consume()
                         topBarOffsetX += dragAmount.x
                         topBarOffsetY += dragAmount.y
+                        lastTopBarInteractionTime = System.currentTimeMillis()
+                        isTopBarDimmed = false
                     }
                 },
             contentAlignment = Alignment.Center
@@ -1878,6 +1924,8 @@ private fun StreamingViewContent(
                     // 设置固定内容宽度与 Monospace 等宽字体，使 0-120 FPS 切换时胶囊宽度始终恒定 92dp，绝无任何抖动
                     Surface(
                         onClick = {
+                            lastTopBarInteractionTime = System.currentTimeMillis()
+                            isTopBarDimmed = false
                             isTopBarExpanded = true
                             controller.updateConfig(config.copy(isTopBarExpanded = true))
                         },
@@ -1927,7 +1975,18 @@ private fun StreamingViewContent(
 
         AnimatedVisibility(
             visible = isToolbarExpanded,
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .graphicsLayer { alpha = toolbarAlpha }
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent(PointerEventPass.Initial)
+                            lastToolbarInteractionTime = System.currentTimeMillis()
+                            isToolbarDimmed = false
+                        }
+                    }
+                },
             enter = fadeIn(animationSpec = tween(280)) + slideInVertically(initialOffsetY = { it / 2 }, animationSpec = tween(280)) + scaleIn(initialScale = 0.9f, animationSpec = tween(280)),
             exit = fadeOut(animationSpec = tween(200)) + slideOutVertically(targetOffsetY = { it / 2 }, animationSpec = tween(200)) + scaleOut(targetScale = 0.9f, animationSpec = tween(200))
         ) {
@@ -2256,13 +2315,26 @@ private fun StreamingViewContent(
 
         AnimatedVisibility(
             visible = !isToolbarExpanded,
-            modifier = Modifier.align(Alignment.BottomEnd),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .graphicsLayer { alpha = toolbarAlpha }
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent(PointerEventPass.Initial)
+                            lastToolbarInteractionTime = System.currentTimeMillis()
+                            isToolbarDimmed = false
+                        }
+                    }
+                },
             enter = fadeIn(animationSpec = tween(280)) + scaleIn(initialScale = 0.7f, animationSpec = tween(280)),
             exit = fadeOut(animationSpec = tween(200)) + scaleOut(targetScale = 0.7f, animationSpec = tween(200))
         ) {
             // Collapsed Floating Mini FAB/Bubble
             Surface(
                 onClick = {
+                    lastToolbarInteractionTime = System.currentTimeMillis()
+                    isToolbarDimmed = false
                     isToolbarExpanded = true
                     controller.updateConfig(config.copy(isToolbarExpanded = true))
                 },
@@ -2278,6 +2350,8 @@ private fun StreamingViewContent(
                             change.consume()
                             miniFabOffsetX += dragAmount.x
                             miniFabOffsetY += dragAmount.y
+                            lastToolbarInteractionTime = System.currentTimeMillis()
+                            isToolbarDimmed = false
                         }
                     }
                     .size(48.dp)

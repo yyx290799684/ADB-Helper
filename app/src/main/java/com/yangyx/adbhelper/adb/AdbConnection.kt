@@ -241,6 +241,20 @@ class AdbConnection(
         }
     }
 
+    fun isConnectionAlive(timeoutMs: Long = 3000): Boolean {
+        if (!isConnected) return false
+        if (!isUsb && (socket == null || socket?.isClosed == true || socket?.isConnected != true)) return false
+        return try {
+            val stream = openStream("shell:echo 1")
+            try {
+                stream.close()
+            } catch (_: Exception) {}
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun openStream(destination: String): AdbStream {
         if (!isConnected || socket?.isClosed == true) {
             val reconnected = ensureConnected(5000)

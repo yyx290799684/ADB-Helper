@@ -775,6 +775,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     is ConnectionState.Connected -> {
                         val session = currentSession
                         WidgetStateHolder.onConnected(session, state.deviceName, state.ip, _sessions.value.size)
+                        WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(getApplication(), 10 * 60 * 1000L)
                         if (autoStartMirrorOnConnect) {
                             autoStartMirrorOnConnect = false
                             triggerMirrorFromWidget()
@@ -786,6 +787,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     is ConnectionState.Disconnected, is ConnectionState.Error -> {
                         if (WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING && activeConnectJob?.isActive != true) {
                             WidgetStateHolder.onDisconnected()
+                            WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
                             autoStartMirrorOnConnect = false
                             if (_sessions.value.isEmpty()) {
                                 com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
@@ -802,11 +804,14 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 val active = currentSession
                 if (active != null) {
                     WidgetStateHolder.onConnected(active, active.deviceName, "${active.ip}:${active.port}", sessionList.size)
+                    WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(getApplication(), 10 * 60 * 1000L)
                 } else if (sessionList.isNotEmpty()) {
                     val first = sessionList.first()
                     WidgetStateHolder.onConnected(first, first.deviceName, "${first.ip}:${first.port}", sessionList.size)
+                    WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(getApplication(), 10 * 60 * 1000L)
                 } else if (_connectionState.value !is ConnectionState.Connecting && WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING && activeConnectJob?.isActive != true) {
                     WidgetStateHolder.onDisconnected()
+                    WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
                 }
                 WidgetUpdateHelper.updateAllWidgets(getApplication())
             }
@@ -1780,16 +1785,21 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteSingleIp(device: DeviceEntity) {
         viewModelScope.launch(Dispatchers.IO) {
+            WidgetUpdateHelper.removeDeletedDevice(getApplication(), device.serialNo, setOf(device.ipAddress))
             if (device.id != 0L) {
                 repository.deleteDeviceById(device.id)
             } else {
                 repository.deleteDeviceByIpAndPort(device.ipAddress, device.port)
             }
+            WidgetUpdateHelper.updateAllWidgets(getApplication())
         }
     }
 
     fun deleteGroupDevice(group: GroupedDevice) {
         viewModelScope.launch(Dispatchers.IO) {
+            val ips = group.ipRecords.map { it.ipAddress }.toSet()
+            WidgetUpdateHelper.removeDeletedDevice(getApplication(), group.serialNo, ips)
+
             val editor = devicePrefs.edit()
             if (group.serialNo.isNotBlank()) {
                 editor.remove("manual_order_serial_${group.serialNo}")
@@ -1815,6 +1825,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     repository.deleteDeviceByIpAndPort(record.ipAddress, record.port)
                 }
             }
+            WidgetUpdateHelper.updateAllWidgets(getApplication())
         }
     }
 
@@ -2935,7 +2946,9 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteDeviceFromHistory(ip: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            WidgetUpdateHelper.removeDeletedDevice(getApplication(), "", setOf(ip))
             repository.deleteDevice(ip)
+            WidgetUpdateHelper.updateAllWidgets(getApplication())
         }
     }
 

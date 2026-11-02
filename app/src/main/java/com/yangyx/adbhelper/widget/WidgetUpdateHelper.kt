@@ -26,9 +26,13 @@ object WidgetUpdateHelper {
     const val ACTION_WIDGET_TERMINAL = "com.yangyx.adbhelper.widget.ACTION_TERMINAL"
     const val ACTION_WIDGET_OPEN_DEVICE = "com.yangyx.adbhelper.widget.ACTION_OPEN_DEVICE"
     const val ACTION_WIDGET_START_SCAN = "com.yangyx.adbhelper.widget.ACTION_START_SCAN"
+    const val ACTION_WIDGET_HEALTH_CHECK = "com.yangyx.adbhelper.widget.ACTION_HEALTH_CHECK"
+    const val ACTION_WIDGET_EXPIRE_SCAN = "com.yangyx.adbhelper.widget.ACTION_EXPIRE_SCAN"
 
     private const val PREFS_CACHE = "adb_widget_cached_devices"
     private const val KEY_CACHED_DEVICES_JSON = "cached_devices_json"
+    private const val KEY_SCANNED_DEVICES_JSON = "scanned_devices_json"
+    private const val KEY_LAST_SCAN_TIME = "last_scan_time"
 
     fun saveDevicesToCache(context: Context, list: List<WidgetDeviceInfo>) {
         try {
@@ -78,9 +82,7 @@ object WidgetUpdateHelper {
         }
     }
 
-    private const val KEY_SCANNED_DEVICES_JSON = "scanned_devices_json"
-
-    fun saveScannedDevicesToCache(context: Context, list: List<WidgetDeviceInfo>) {
+    fun saveScannedDevicesToCache(context: Context, list: List<WidgetDeviceInfo>, timestamp: Long = System.currentTimeMillis()) {
         try {
             val jsonArray = org.json.JSONArray()
             for (d in list) {
@@ -98,6 +100,7 @@ object WidgetUpdateHelper {
             context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_SCANNED_DEVICES_JSON, jsonArray.toString())
+                .putLong(KEY_LAST_SCAN_TIME, timestamp)
                 .apply()
         } catch (_: Exception) {}
     }
@@ -105,6 +108,12 @@ object WidgetUpdateHelper {
     fun loadScannedDevicesFromCache(context: Context): List<WidgetDeviceInfo> {
         return try {
             val sp = context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
+            val lastScanTime = sp.getLong(KEY_LAST_SCAN_TIME, 0L)
+            if (lastScanTime > 0L && System.currentTimeMillis() - lastScanTime >= WidgetStateHolder.SCAN_EXPIRATION_MILLIS) {
+                // 扫描结果已超过 10 分钟有效期，清理缓存并返回空列表
+                clearScannedDevicesCache(context)
+                return emptyList()
+            }
             val jsonStr = sp.getString(KEY_SCANNED_DEVICES_JSON, null) ?: return emptyList()
             val jsonArray = org.json.JSONArray(jsonStr)
             val list = mutableListOf<WidgetDeviceInfo>()
@@ -126,6 +135,74 @@ object WidgetUpdateHelper {
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    fun clearScannedDevicesCache(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_SCANNED_DEVICES_JSON)
+                .remove(KEY_LAST_SCAN_TIME)
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    fun scheduleScanExpirationAlarm(context: Context, delayMillis: Long = WidgetStateHolder.SCAN_EXPIRATION_MILLIS) {
+        try {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+            val intent = Intent(context, WidgetActionReceiver::class.java).apply {
+                action = ACTION_WIDGET_EXPIRE_SCAN
+            }
+            val pi = PendingIntent.getBroadcast(
+                context,
+                991,
+                intent,
+                getPendingIntentFlags()
+            )
+            val triggerAt = System.currentTimeMillis() + delayMillis
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            } else {
+                alarmManager.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun scheduleConnectionHealthCheckAlarm(context: Context, delayMillis: Long = 10 * 60 * 1000L) {
+        try {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+            val intent = Intent(context, WidgetActionReceiver::class.java).apply {
+                action = ACTION_WIDGET_HEALTH_CHECK
+            }
+            val pi = PendingIntent.getBroadcast(
+                context,
+                992,
+                intent,
+                getPendingIntentFlags()
+            )
+            val triggerAt = System.currentTimeMillis() + delayMillis
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            } else {
+                alarmManager.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun cancelConnectionHealthCheckAlarm(context: Context) {
+        try {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+            val intent = Intent(context, WidgetActionReceiver::class.java).apply {
+                action = ACTION_WIDGET_HEALTH_CHECK
+            }
+            val pi = PendingIntent.getBroadcast(
+                context,
+                992,
+                intent,
+                getPendingIntentFlags()
+            )
+            alarmManager.cancel(pi)
+        } catch (_: Exception) {}
     }
 
     fun updateAllWidgets(context: Context) {
@@ -162,6 +239,12 @@ object WidgetUpdateHelper {
         }
     }
 
+    fun removeDeletedDevice(context: Context, serialNo: String, ips: Set<String>) {
+        WidgetStateHolder.removeDeletedDevice(serialNo, ips)
+        saveDevicesToCache(context, WidgetStateHolder.recentDevices)
+        updateAllWidgets(context)
+    }
+
     private suspend fun ensureFallbackDeviceInfo(context: Context) {
         try {
             val db = AppDatabase.getDatabase(context)
@@ -173,6 +256,8 @@ object WidgetUpdateHelper {
             }
             if (allDevices.isEmpty()) {
                 WidgetStateHolder.recentDevices = emptyList()
+                saveDevicesToCache(context, emptyList())
+                WidgetStateHolder.clearFallbackDeviceInfo()
                 return
             }
 
@@ -261,23 +346,44 @@ object WidgetUpdateHelper {
             WidgetStateHolder.recentDevices = top5
             saveDevicesToCache(context, top5)
 
-            if (WidgetStateHolder.currentState == WidgetStateHolder.State.DISCONNECTED &&
-                WidgetStateHolder.deviceName.isBlank() && top5.isNotEmpty()
-            ) {
-                val first = top5.first()
-                WidgetStateHolder.setFallbackDeviceInfo(first.name, "${first.ip}:${first.port}")
+            if (WidgetStateHolder.currentState == WidgetStateHolder.State.DISCONNECTED) {
+                val first = top5.firstOrNull()
+                if (first != null) {
+                    WidgetStateHolder.setFallbackDeviceInfo(first.name, "${first.ip}:${first.port}")
+                } else {
+                    WidgetStateHolder.clearFallbackDeviceInfo()
+                }
             }
 
-            if (WidgetStateHolder.scanState == WidgetStateHolder.ScanState.IDLE) {
+            // 检查已连接设备连接状态，若已断开则自动恢复断开前状态
+            if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
+                val active = WidgetStateHolder.activeConnection
+                if (active == null || !active.isConnected) {
+                    WidgetStateHolder.onDisconnected()
+                }
+            }
+
+            // 检查扫描结果是否超过 10 分钟有效期
+            if (WidgetStateHolder.checkAndExpireScan()) {
+                clearScannedDevicesCache(context)
+            } else if (WidgetStateHolder.scanState == WidgetStateHolder.ScanState.IDLE) {
                 val cachedScanned = loadScannedDevicesFromCache(context)
                 if (cachedScanned.isNotEmpty()) {
-                    WidgetStateHolder.onScanFinished(cachedScanned, "发现 ${cachedScanned.size} 台设备")
+                    val sp = context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
+                    val time = sp.getLong(KEY_LAST_SCAN_TIME, System.currentTimeMillis())
+                    WidgetStateHolder.onScanFinished(cachedScanned, "发现 ${cachedScanned.size} 台设备", time)
                 }
             }
         } catch (_: Exception) {}
     }
 
     fun build2x2Views(context: Context): RemoteViews {
+        if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
+            val active = WidgetStateHolder.activeConnection
+            if (active == null || !active.isConnected) {
+                WidgetStateHolder.onDisconnected()
+            }
+        }
         val views = RemoteViews(context.packageName, R.layout.widget_quick_2x2)
         val state = WidgetStateHolder.currentState
         var recents = WidgetStateHolder.recentDevices
@@ -287,11 +393,15 @@ object WidgetUpdateHelper {
                 WidgetStateHolder.recentDevices = recents
             }
         }
-        val name = WidgetStateHolder.deviceName.ifBlank {
+        val name = if (state == WidgetStateHolder.State.CONNECTED) {
+            WidgetStateHolder.deviceName.ifBlank { "已连接设备" }
+        } else {
             recents.firstOrNull()?.name ?: "点击连接设备"
         }
-        val ip = WidgetStateHolder.deviceIp.ifBlank {
-            recents.firstOrNull()?.let { "${it.ip}:${it.port}" } ?: "上次会话设备已就绪"
+        val ip = if (state == WidgetStateHolder.State.CONNECTED) {
+            WidgetStateHolder.deviceIp.ifBlank { "" }
+        } else {
+            recents.firstOrNull()?.let { "${it.ip}:${it.port}" } ?: "暂无保存设备"
         }
 
         // 1. Header 点击进入应用
@@ -381,15 +491,10 @@ object WidgetUpdateHelper {
                     itemId,
                     createConnectDevicePendingIntent(context, d.ip, d.port, d.name, 120 + i, d.serialNo)
                 )
-            } else if (i == recents.size && i == 0) {
+            } else if (recents.isEmpty() && i == 0) {
                 views.setViewVisibility(itemId, View.VISIBLE)
-                views.setTextViewText(nameId, "快速添加设备")
+                views.setTextViewText(nameId, "暂无保存设备")
                 views.setTextViewText(actionId, "添加")
-                views.setOnClickPendingIntent(itemId, createOpenAppPendingIntent(context, 120 + i))
-            } else if (i == recents.size && i < 4) {
-                views.setViewVisibility(itemId, View.VISIBLE)
-                views.setTextViewText(nameId, "局域网扫描新设备")
-                views.setTextViewText(actionId, "扫描")
                 views.setOnClickPendingIntent(itemId, createOpenAppPendingIntent(context, 120 + i))
             } else {
                 views.setViewVisibility(itemId, View.GONE)
@@ -412,6 +517,15 @@ object WidgetUpdateHelper {
     }
 
     fun build4x2Views(context: Context): RemoteViews {
+        if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
+            val active = WidgetStateHolder.activeConnection
+            if (active == null || !active.isConnected) {
+                WidgetStateHolder.onDisconnected()
+            }
+        }
+        if (WidgetStateHolder.checkAndExpireScan()) {
+            clearScannedDevicesCache(context)
+        }
         val views = RemoteViews(context.packageName, R.layout.widget_control_4x2)
         val state = WidgetStateHolder.currentState
         var recents = WidgetStateHolder.recentDevices
@@ -421,10 +535,14 @@ object WidgetUpdateHelper {
                 WidgetStateHolder.recentDevices = recents
             }
         }
-        val name = WidgetStateHolder.deviceName.ifBlank {
-            recents.firstOrNull()?.name ?: "已连接设备"
+        val name = if (state == WidgetStateHolder.State.CONNECTED) {
+            WidgetStateHolder.deviceName.ifBlank { "已连接设备" }
+        } else {
+            recents.firstOrNull()?.name ?: "暂无保存设备"
         }
-        val ip = WidgetStateHolder.deviceIp.ifBlank {
+        val ip = if (state == WidgetStateHolder.State.CONNECTED) {
+            WidgetStateHolder.deviceIp.ifBlank { "" }
+        } else {
             recents.firstOrNull()?.let { "${it.ip}:${it.port}" } ?: "点击连接设备"
         }
 
@@ -510,15 +628,10 @@ object WidgetUpdateHelper {
                     itemId,
                     createConnectDevicePendingIntent(context, d.ip, d.port, d.name, 210 + i, d.serialNo)
                 )
-            } else if (i == recents.size && i == 0) {
+            } else if (recents.isEmpty() && i == 0) {
                 views.setViewVisibility(itemId, View.VISIBLE)
                 views.setTextViewText(nameId, "暂无保存设备")
                 views.setTextViewText(actionId, "点击添加")
-                views.setOnClickPendingIntent(itemId, createOpenAppPendingIntent(context, 210 + i))
-            } else if (i == recents.size && i < 4) {
-                views.setViewVisibility(itemId, View.VISIBLE)
-                views.setTextViewText(nameId, "局域网扫描新设备")
-                views.setTextViewText(actionId, "扫描")
                 views.setOnClickPendingIntent(itemId, createOpenAppPendingIntent(context, 210 + i))
             } else {
                 views.setViewVisibility(itemId, View.GONE)
@@ -624,6 +737,9 @@ object WidgetUpdateHelper {
     }
 
     private fun bind4x2ScanPanel(context: Context, views: RemoteViews) {
+        if (WidgetStateHolder.checkAndExpireScan()) {
+            clearScannedDevicesCache(context)
+        }
         val scanState = WidgetStateHolder.scanState
         var scanned = WidgetStateHolder.scannedDevices
         if (scanned.isEmpty() && scanState == WidgetStateHolder.ScanState.FINISHED) {
@@ -635,7 +751,9 @@ object WidgetUpdateHelper {
             val cached = loadScannedDevicesFromCache(context)
             if (cached.isNotEmpty()) {
                 scanned = cached
-                WidgetStateHolder.onScanFinished(cached, "发现 ${cached.size} 台设备")
+                val sp = context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
+                val time = sp.getLong(KEY_LAST_SCAN_TIME, System.currentTimeMillis())
+                WidgetStateHolder.onScanFinished(cached, "发现 ${cached.size} 台设备", time)
             }
         }
 

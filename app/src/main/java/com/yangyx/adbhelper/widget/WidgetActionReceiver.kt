@@ -101,6 +101,7 @@ class WidgetActionReceiver : BroadcastReceiver() {
                         }
                         AdbViewModel.currentInstance?.disconnectCurrentSession()
                         WidgetStateHolder.onDisconnected()
+                        WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(context)
                         WidgetUpdateHelper.updateAllWidgets(context)
                         showToast(context, "已断开 ADB 连接")
                     }
@@ -152,12 +153,14 @@ class WidgetActionReceiver : BroadcastReceiver() {
 
                             WidgetStateHolder.onScanFinished(
                                 devices = mappedList,
-                                progressText = if (mappedList.isNotEmpty()) "发现 ${mappedList.size} 台设备" else "未发现新设备"
+                                progressText = if (mappedList.isNotEmpty()) "发现 ${mappedList.size} 台设备" else "未发现新设备",
+                                timestamp = now
                             )
-                            WidgetUpdateHelper.saveScannedDevicesToCache(context, mappedList)
+                            WidgetUpdateHelper.saveScannedDevicesToCache(context, mappedList, now)
+                            WidgetUpdateHelper.scheduleScanExpirationAlarm(context, WidgetStateHolder.SCAN_EXPIRATION_MILLIS)
 
                             if (mappedList.isNotEmpty()) {
-                                showToast(context, "扫描完成，发现 ${mappedList.size} 台设备")
+                                showToast(context, "扫描完成，发现 ${mappedList.size} 台设备 (保留10分钟)")
                             } else {
                                 showToast(context, "扫描完成，未找到开放 5555 端口的设备")
                             }
@@ -170,6 +173,49 @@ class WidgetActionReceiver : BroadcastReceiver() {
                                 com.yangyx.adbhelper.service.AdbSessionService.stopService(context)
                             }
                             WidgetUpdateHelper.updateAllWidgets(context)
+                        }
+                    }
+
+                    WidgetUpdateHelper.ACTION_WIDGET_EXPIRE_SCAN -> {
+                        if (WidgetStateHolder.isScanExpired()) {
+                            WidgetStateHolder.resetScanState()
+                            WidgetUpdateHelper.clearScannedDevicesCache(context)
+                            WidgetUpdateHelper.updateAllWidgets(context)
+                        }
+                    }
+
+                    WidgetUpdateHelper.ACTION_WIDGET_HEALTH_CHECK -> {
+                        // 1. 同时检查扫描结果是否过期 (10分钟)
+                        if (WidgetStateHolder.isScanExpired()) {
+                            WidgetStateHolder.resetScanState()
+                            WidgetUpdateHelper.clearScannedDevicesCache(context)
+                            WidgetUpdateHelper.updateAllWidgets(context)
+                        }
+
+                        // 2. 检查已连接设备连接状态，每 10 分钟检测一次，若已掉线则自动恢复连接前界面
+                        if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
+                            val conn = WidgetStateHolder.activeConnection
+                            val isAlive = try {
+                                if (conn == null || !conn.isConnected) {
+                                    false
+                                } else {
+                                    conn.isConnectionAlive(3000)
+                                }
+                            } catch (_: Exception) {
+                                false
+                            }
+
+                            if (!isAlive) {
+                                // 设备已掉线，恢复连接前界面
+                                AdbViewModel.currentInstance?.disconnectCurrentSession()
+                                WidgetStateHolder.onDisconnected()
+                                com.yangyx.adbhelper.service.AdbSessionService.stopService(context)
+                                WidgetUpdateHelper.updateAllWidgets(context)
+                                WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(context)
+                            } else {
+                                // 仍然在线，安排下一次 10 分钟检测
+                                WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
+                            }
                         }
                     }
                 }

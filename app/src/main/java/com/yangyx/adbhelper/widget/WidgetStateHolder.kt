@@ -65,6 +65,16 @@ object WidgetStateHolder {
 
     private var activeSessionRef: WeakReference<AdbDeviceSession>? = null
 
+    const val SCAN_EXPIRATION_MILLIS = 10 * 60 * 1000L // 10分钟扫描有效期
+
+    @Volatile
+    var lastScanTimestamp: Long = 0L
+        private set
+
+    @Volatile
+    var lastConnectedCheckTimestamp: Long = 0L
+        private set
+
     val activeSession: AdbDeviceSession?
         get() = activeSessionRef?.get()
 
@@ -77,6 +87,7 @@ object WidgetStateHolder {
         deviceIp = ip
         connectedDeviceCount = count
         activeSessionRef = session?.let { WeakReference(it) }
+        lastConnectedCheckTimestamp = System.currentTimeMillis()
     }
 
     fun onConnecting(name: String = "", ip: String = "") {
@@ -89,6 +100,7 @@ object WidgetStateHolder {
         currentState = State.DISCONNECTED
         connectedDeviceCount = 0
         activeSessionRef = null
+        lastConnectedCheckTimestamp = 0L
     }
 
     fun setFallbackDeviceInfo(name: String, ip: String) {
@@ -98,20 +110,62 @@ object WidgetStateHolder {
         }
     }
 
+    fun clearFallbackDeviceInfo() {
+        if (currentState == State.DISCONNECTED) {
+            deviceName = ""
+            deviceIp = ""
+        }
+    }
+
+    fun removeDeletedDevice(serialNo: String, ips: Set<String>) {
+        recentDevices = recentDevices.filterNot { d ->
+            (serialNo.isNotBlank() && d.serialNo == serialNo) || ips.contains(d.ip)
+        }
+        scannedDevices = scannedDevices.filterNot { d ->
+            (serialNo.isNotBlank() && d.serialNo == serialNo) || ips.contains(d.ip)
+        }
+        if (currentState == State.DISCONNECTED) {
+            val first = recentDevices.firstOrNull()
+            if (first != null) {
+                deviceName = first.name
+                deviceIp = "${first.ip}:${first.port}"
+            } else {
+                deviceName = ""
+                deviceIp = ""
+            }
+        }
+    }
+
     fun onScanStarted() {
         scanState = ScanState.SCANNING
         scanProgressText = "正在扫描局域网..."
     }
 
-    fun onScanFinished(devices: List<WidgetDeviceInfo>, progressText: String) {
+    fun onScanFinished(devices: List<WidgetDeviceInfo>, progressText: String, timestamp: Long = System.currentTimeMillis()) {
         scanState = ScanState.FINISHED
         scannedDevices = devices
         scanProgressText = progressText
+        lastScanTimestamp = timestamp
+    }
+
+    fun isScanExpired(): Boolean {
+        if (scanState == ScanState.IDLE) return false
+        if (lastScanTimestamp <= 0L) return false
+        return (System.currentTimeMillis() - lastScanTimestamp) >= SCAN_EXPIRATION_MILLIS
+    }
+
+    fun checkAndExpireScan(): Boolean {
+        if (isScanExpired()) {
+            resetScanState()
+            return true
+        }
+        return false
     }
 
     fun resetScanState() {
         scanState = ScanState.IDLE
         scanProgressText = ""
         scannedDevices = emptyList()
+        lastScanTimestamp = 0L
     }
 }

@@ -22,6 +22,9 @@ class ControlCenterWidgetProvider4x2 : AppWidgetProvider() {
         appWidgetIds: IntArray
     ) {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
+        if (WidgetStateHolder.checkAndExpireScan()) {
+            WidgetUpdateHelper.clearScannedDevicesCache(context)
+        }
         val views = WidgetUpdateHelper.build4x2Views(context)
         if (appWidgetIds.isNotEmpty()) {
             try {
