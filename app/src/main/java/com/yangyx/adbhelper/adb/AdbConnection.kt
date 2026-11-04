@@ -215,7 +215,120 @@ class AdbConnection(
                         }
                     }
                 }
+                AdbMessage.CMD_OPEN -> {
+                    val remoteId = msg.arg0
+                    val destination = String(msg.payload, Charsets.UTF_8).trimEnd('\u0000')
+                    handleIncomingOpen(remoteId, destination)
+                }
             }
+        }
+    }
+
+    private fun handleIncomingOpen(remoteId: Int, destination: String) {
+        val localId = localIdCounter.getAndIncrement()
+        val localPort = destination.removePrefix("tcp:").toIntOrNull()
+        if (localPort != null && localPort > 0) {
+            Thread({
+                try {
+                    val localSocket = Socket("127.0.0.1", localPort)
+                    localSocket.tcpNoDelay = true
+                    val stream = AdbStream(localId, this)
+                    stream.remoteId = remoteId
+                    streams[localId] = stream
+                    sendOkay(localId, remoteId)
+
+                    val t1 = Thread({
+                        try {
+                            val inStream = localSocket.getInputStream()
+                            val buf = ByteArray(16384)
+                            while (isConnected && !localSocket.isClosed && !stream.isClosed) {
+                                val n = inStream.read(buf)
+                                if (n < 0) break
+                                if (n > 0) {
+                                    val chunk = if (n == buf.size) buf else buf.copyOf(n)
+                                    writeStream(stream, chunk)
+                                }
+                            }
+                        } catch (_: Exception) {}
+                        finally {
+                            closeStream(stream)
+                            try { localSocket.close() } catch (_: Exception) {}
+                        }
+                    }, "ReversePipe-Out-$localId")
+                    t1.isDaemon = true
+                    t1.start()
+
+                    try {
+                        val outStream = localSocket.getOutputStream()
+                        while (isConnected && !localSocket.isClosed && !stream.isClosed) {
+                            val data = stream.read(5000L)
+                            if (data != null && data.isNotEmpty()) {
+                                outStream.write(data)
+                                outStream.flush()
+                            }
+                        }
+                    } catch (_: Exception) {}
+                    finally {
+                        closeStream(stream)
+                        try { localSocket.close() } catch (_: Exception) {}
+                    }
+                } catch (_: Exception) {
+                    safeWriteMessage(AdbMessage(AdbMessage.CMD_CLSE, 0, remoteId))
+                }
+            }, "ReverseConnect-$localId").apply {
+                isDaemon = true
+                start()
+            }
+        } else {
+            safeWriteMessage(AdbMessage(AdbMessage.CMD_CLSE, 0, remoteId))
+        }
+    }
+
+    fun reverseForward(remoteSpec: String, localSpec: String): Result<Unit> {
+        val remote = if (!remoteSpec.contains(":")) "tcp:$remoteSpec" else remoteSpec
+        val local = if (!localSpec.contains(":")) "tcp:$localSpec" else localSpec
+        return executeReverseCommand("forward:$remote;$local").map { }
+    }
+
+    fun reverseKillForward(remoteSpec: String): Result<Unit> {
+        val remote = if (!remoteSpec.contains(":")) "tcp:$remoteSpec" else remoteSpec
+        return executeReverseCommand("killforward:$remote").map { }
+    }
+
+    fun reverseKillForwardAll(): Result<Unit> {
+        return executeReverseCommand("killforward-all").map { }
+    }
+
+    fun reverseListForward(): List<AdbReverseRule> {
+        val res = executeReverseCommand("list-forward")
+        val text = res.getOrNull() ?: return emptyList()
+        if (text.isEmpty() || text.startsWith("FAIL")) return emptyList()
+
+        val list = mutableListOf<AdbReverseRule>()
+        text.lines().forEach { line ->
+            val parts = line.trim().split(Regex("\\s+"))
+            if (parts.size >= 3) {
+                list.add(AdbReverseRule(remoteSpec = parts[1], localSpec = parts[2]))
+            } else if (parts.size == 2) {
+                list.add(AdbReverseRule(remoteSpec = parts[0], localSpec = parts[1]))
+            }
+        }
+        return list
+    }
+
+    private fun executeReverseCommand(command: String): Result<String> {
+        return try {
+            val stream = openStream("reverse:$command")
+            val data = stream.readAllText(3000L).trim()
+            stream.close()
+            if (data.startsWith("FAIL")) {
+                val err = data.removePrefix("FAIL").drop(4).trim()
+                Result.failure(Exception(if (err.isNotBlank()) err else "反向代理执行失败"))
+            } else {
+                Result.success(data.removePrefix("OKAY").trim())
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
@@ -243,13 +356,19 @@ class AdbConnection(
 
     fun isConnectionAlive(timeoutMs: Long = 3000): Boolean {
         if (!isConnected) return false
-        if (!isUsb && (socket == null || socket?.isClosed == true || socket?.isConnected != true)) return false
+        if (isUsb) return usbConnection != null
+        val s = socket ?: return false
+        return s.isConnected && !s.isClosed && !s.isInputShutdown && !s.isOutputShutdown
+    }
+
+    fun isRemotePortReachable(timeoutMs: Int = 2000): Boolean {
+        if (isUsb) return true
+        if (ip.isBlank() || port <= 0) return false
         return try {
-            val stream = openStream("shell:echo 1")
-            try {
-                stream.close()
-            } catch (_: Exception) {}
-            true
+            Socket().use { testSocket ->
+                testSocket.connect(InetSocketAddress(ip, port), timeoutMs)
+                true
+            }
         } catch (_: Exception) {
             false
         }

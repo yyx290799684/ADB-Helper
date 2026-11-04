@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,11 +27,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.AltRoute
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Backspace
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.BatteryChargingFull
+import com.yangyx.adbhelper.adb.AdbForwardRule
+import com.yangyx.adbhelper.adb.AdbReverseRule
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
@@ -94,6 +104,36 @@ import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.text.font.FontFamily
+import android.graphics.BitmapFactory
+import com.yangyx.adbhelper.ui.models.ScreenRecordState
+import com.yangyx.adbhelper.ui.models.RemoteScreenshotResult
+import com.yangyx.adbhelper.ui.models.RemoteScreenRecordResult
+import java.util.Locale
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -107,6 +147,8 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -412,15 +454,29 @@ private fun DeviceControlTab(
     val densityInfo by viewModel.deviceDensity.collectAsState()
     val quickSettings by viewModel.deviceQuickSettings.collectAsState()
     val mediaInfo by viewModel.mediaPlaybackInfo.collectAsState()
+    val context = LocalContext.current
+    val isCapturingScreenshot by viewModel.isCapturingScreenshot.collectAsState()
+    val pendingScreenshotDialog by viewModel.pendingScreenshotDialog.collectAsState()
+    val screenRecordState by viewModel.screenRecordState.collectAsState()
+    val screenRecordDuration by viewModel.screenRecordDurationSeconds.collectAsState()
+    val pendingScreenRecordDialog by viewModel.pendingScreenRecordDialog.collectAsState()
+    val isDownloadingScreenRecord by viewModel.isDownloadingScreenRecord.collectAsState()
     var pendingRebootOption by remember { mutableStateOf<RebootOption?>(null) }
     var dpiInputText by remember { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
 
-    // 初始化时获取最新的 DPI、分辨率、控制中心开关状态与正在播放媒体信息
+    val forwardRules by viewModel.forwardRules.collectAsState()
+    val reverseRules by viewModel.reverseRules.collectAsState()
+    var showForwardReverseHelpDialog by remember { mutableStateOf(false) }
+    var showAddForwardDialog by remember { mutableStateOf(false) }
+    var showAddReverseDialog by remember { mutableStateOf(false) }
+
+    // 初始化时获取最新的 DPI、分辨率、控制中心开关状态、媒体信息与反向代理列表
     LaunchedEffect(Unit) {
         viewModel.fetchDeviceDensity()
         viewModel.fetchQuickSettings()
         viewModel.fetchMediaPlaybackInfo()
+        viewModel.fetchReverseRules()
     }
 
     // 当获取到当前 DPI 时，若输入框为空则填充当前值
@@ -726,6 +782,198 @@ private fun DeviceControlTab(
                             onClick = { viewModel.toggleMobileData() },
                             modifier = Modifier.weight(1f)
                         )
+                    }
+                }
+            }
+        }
+
+        // 1.2. 远程截图与录屏 Card (Remote Capture & Screen Recording)
+        item(key = "screen_capture_record") {
+            InfoCard(
+                title = "远程截图与录屏 (Capture & Recording)",
+                icon = Icons.Default.PhotoCamera,
+                iconTint = Color(0xFFF43F5E)
+            ) {
+                Text(
+                    text = "一键对被控端屏幕进行远程实时截图或高清录屏，完成后可即时预览并一键下载保存到本地相册与视频库。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // 截图按钮
+                    Button(
+                        onClick = { viewModel.takeRemoteScreenshot(context) },
+                        enabled = !isCapturingScreenshot && screenRecordState != ScreenRecordState.RECORDING,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                    ) {
+                        if (isCapturingScreenshot) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onSecondary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("截图中...", fontSize = 13.sp)
+                        } else {
+                            Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("远程截图", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    // 录屏按钮 / 录屏控制器
+                    if (screenRecordState == ScreenRecordState.IDLE) {
+                        Button(
+                            onClick = { viewModel.startRemoteScreenRecord() },
+                            enabled = !isCapturingScreenshot,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE11D48)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                        ) {
+                            Icon(Icons.Default.Videocam, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("开始录屏", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                    } else if (screenRecordState == ScreenRecordState.STOPPING) {
+                        Button(
+                            onClick = {},
+                            enabled = false,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("正在结束...", fontSize = 12.sp)
+                        }
+                    } else {
+                        // 录制中时右侧显示录制时长药丸
+                        val minutes = screenRecordDuration / 60
+                        val seconds = screenRecordDuration % 60
+                        val timeStr = String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFE11D48).copy(alpha = 0.15f),
+                            border = BorderStroke(1.dp, Color(0xFFE11D48)),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+                                val pulseAlpha by infiniteTransition.animateFloat(
+                                    initialValue = 0.3f,
+                                    targetValue = 1.0f,
+                                    animationSpec = infiniteRepeatable(
+                                        animation = tween(600),
+                                        repeatMode = RepeatMode.Reverse
+                                    ),
+                                    label = "rec_pulse"
+                                )
+                                Icon(
+                                    Icons.Default.FiberManualRecord,
+                                    contentDescription = null,
+                                    tint = Color(0xFFE11D48).copy(alpha = pulseAlpha),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "录制中 $timeStr",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = Color(0xFFE11D48)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 录制中状态操作面板 (当 screenRecordState == RECORDING 时展开)
+                if (screenRecordState == ScreenRecordState.RECORDING) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Videocam,
+                                        contentDescription = "Recording",
+                                        tint = Color(0xFFE11D48),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "被控端正在高清录制屏幕",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { viewModel.stopRemoteScreenRecord(context) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE11D48)),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp)
+                                ) {
+                                    Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("结束录制", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                OutlinedButton(
+                                    onClick = { viewModel.cancelRemoteScreenRecord() },
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.height(40.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("取消", fontSize = 12.sp)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1176,6 +1424,364 @@ private fun DeviceControlTab(
             }
         }
 
+        // 端口映射与反向代理 (Forward & Reverse) Card
+        item(key = "forward_reverse_control") {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // 头部标题 + 帮助 “?” 按钮 + 刷新按钮
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.AltRoute,
+                                contentDescription = "端口映射与反向代理",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "端口映射与反向代理 (Forward & Reverse)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = { showForwardReverseHelpDialog = true },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.HelpOutline,
+                                    contentDescription = "使用说明与场景解析",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.fetchReverseRules() },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "刷新反向代理列表",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "通过底层 ADB 隧道实现主控端与被控手机之间的端口双向穿透访问，用于调试 Web 页面、本地 API 或跨端开发服务。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 1. 正向端口映射 (Forward) 区域
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "正向端口映射 (Forward)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.padding(horizontal = 2.dp)
+                            ) {
+                                Text(
+                                    text = "${forwardRules.size}",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        if (forwardRules.isNotEmpty()) {
+                            TextButton(
+                                onClick = { viewModel.stopAllForwardRules() },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                            ) {
+                                Text("停止全部", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "方向：本机 ➡️ 手机 (本机开启端口监听，请求转发至被控手机服务)",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (forwardRules.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "暂无活跃的 Forward 映射规则，点击下方按钮添加",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            forwardRules.forEach { rule ->
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = "127.0.0.1:${rule.localPort}",
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 13.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Icon(
+                                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = rule.remoteSpec,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 13.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Surface(
+                                                    shape = CircleShape,
+                                                    color = if (rule.isRunning) Color(0xFF10B981) else MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.size(6.dp)
+                                                ) {}
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = if (rule.isRunning) "运行中 (活跃连接: ${rule.activeConnections} | 累计: ${rule.totalConnections})" else (rule.errorMessage ?: "已停止"),
+                                                    fontSize = 10.sp,
+                                                    color = if (rule.isRunning) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
+                                                )
+                                            }
+                                        }
+
+                                        IconButton(
+                                            onClick = { viewModel.removeForwardRule(rule.id) },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Delete,
+                                                contentDescription = "删除映射",
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showAddForwardDialog = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("＋ 添加 Forward 映射 (本机 ➡️ 远端)", fontSize = 12.sp)
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 2. 反向代理 (Reverse) 区域
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "反向代理 (Reverse)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                modifier = Modifier.padding(horizontal = 2.dp)
+                            ) {
+                                Text(
+                                    text = "${reverseRules.size}",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        if (reverseRules.isNotEmpty()) {
+                            TextButton(
+                                onClick = { viewModel.removeAllReverseRules() },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                            ) {
+                                Text("清空全部", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "方向：手机 ➡️ 本机 (手机内部开启监听，请求逆向打入控制端本机服务)",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (reverseRules.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "暂无活跃的反向代理规则，点击下方按钮添加",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            reverseRules.forEach { rule ->
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = "手机 ${rule.remoteSpec}",
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 13.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.secondary
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Icon(
+                                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.secondary,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "本机 ${rule.localSpec}",
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 13.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text(
+                                                text = "手机访问 127.0.0.1 对应端口时自动反向路由至本机",
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = { viewModel.removeReverseRule(rule.remoteSpec) },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Delete,
+                                                contentDescription = "删除代理",
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showAddReverseDialog = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("＋ 添加 Reverse 代理 (远端 ➡️ 本机)", fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
         // 2. 电源与重启管理 Card
         item(key = "power_reboot") {
             InfoCard(
@@ -1359,6 +1965,636 @@ private fun DeviceControlTab(
             }
         )
     }
+
+    // 远程截图完成提示与下载确认弹窗
+    pendingScreenshotDialog?.let { screenshot ->
+        val bitmap = remember(screenshot.localBytes) {
+            try {
+                BitmapFactory.decodeByteArray(screenshot.localBytes, 0, screenshot.localBytes.size)?.asImageBitmap()
+            } catch (_: Exception) {
+                null
+            }
+        }
+        val sizeMb = String.format(Locale.getDefault(), "%.2f MB", screenshot.fileSizeBytes / (1024.0 * 1024.0))
+
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissScreenshotDialog() },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.PhotoCamera,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text("📸 远程截图已生成", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // 截图缩略图预览
+                    if (bitmap != null) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            shadowElevation = 2.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 220.dp)
+                        ) {
+                            Image(
+                                bitmap = bitmap,
+                                contentDescription = "远程截图预览",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text(
+                                text = "远端路径: ${screenshot.remotePath}",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "文件大小: $sizeMb · 时间: ${screenshot.timestamp}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "是否将此截图下载保存到本地相册 (Pictures/ADBHelper)？",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.downloadScreenshotToLocal(context, screenshot) },
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("下载到本地相册")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { viewModel.dismissScreenshotDialog() }
+                ) {
+                    Text("留在远端")
+                }
+            }
+        )
+    }
+
+    // 远程录屏完成提示与下载确认弹窗
+    pendingScreenRecordDialog?.let { record ->
+        val sizeMb = if (record.fileSizeBytes > 0) {
+            String.format(Locale.getDefault(), "%.2f MB", record.fileSizeBytes / (1024.0 * 1024.0))
+        } else {
+            "已生成"
+        }
+        val minutes = record.durationSeconds / 60
+        val seconds = record.durationSeconds % 60
+        val durationText = "${minutes}分${seconds}秒"
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!isDownloadingScreenRecord) {
+                    viewModel.dismissScreenRecordDialog()
+                }
+            },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Videocam,
+                    contentDescription = null,
+                    tint = Color(0xFFE11D48),
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = {
+                Text("🎥 远程录屏已完成", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("录制时长:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(durationText, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("视频大小:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(sizeMb, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "远端位置: ${record.remotePath}",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "远程屏幕录制已完成，是否将视频下载保存到控制端本地视频库 (Movies/ADBHelper)？",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    if (isDownloadingScreenRecord) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("正在拉取视频并保存到本地...", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.downloadScreenRecordToLocal(context, record) },
+                    enabled = !isDownloadingScreenRecord,
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("下载到本地")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { viewModel.dismissScreenRecordDialog() },
+                    enabled = !isDownloadingScreenRecord
+                ) {
+                    Text("留在远端")
+                }
+            }
+        )
+    }
+
+    // 端口映射与反向代理使用说明对话框
+    if (showForwardReverseHelpDialog) {
+        ForwardReverseHelpDialog(onDismiss = { showForwardReverseHelpDialog = false })
+    }
+
+    // 添加 Forward 正向映射弹窗
+    if (showAddForwardDialog) {
+        AddForwardDialog(
+            onDismiss = { showAddForwardDialog = false },
+            onConfirm = { localPort, remoteSpec ->
+                viewModel.addForwardRule(localPort, remoteSpec)
+            }
+        )
+    }
+
+    // 添加 Reverse 反向代理弹窗
+    if (showAddReverseDialog) {
+        AddReverseDialog(
+            onDismiss = { showAddReverseDialog = false },
+            onConfirm = { remoteSpec, localSpec ->
+                viewModel.addReverseRule(remoteSpec, localSpec)
+            }
+        )
+    }
+}
+
+/**
+ * 端口映射 (Forward) 与反向代理 (Reverse) 场景说明与区别指南对话框
+ */
+@Composable
+private fun ForwardReverseHelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.HelpOutline,
+                contentDescription = "帮助说明",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(32.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "端口映射与反向代理功能说明",
+                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 440.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // 核心对比卡片
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "💡 一句话核心区别：",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "• Forward (正向映射)：本机 ➡️ 手机 (访问手机上的服务)\n• Reverse (反向代理)：手机 ➡️ 本机 (手机访问本机的服务)",
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                // 1. Forward 详细说明
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(8.dp)
+                        ) {}
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "1. ADB Forward (正向端口映射)",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "【流量流向】控制端本机 ➡️ 被控端手机\n" +
+                                "【监听位置】本机 (127.0.0.1:端口)\n" +
+                                "【转发目标】被控端手机内部指定的网络端口或抽象域 Socket\n\n" +
+                                "【使用场景】\n" +
+                                "1. 访问手机 Web 服务：被控端手机中运行了 Termux、本地 HTTP 调试服务器或微服务，在本机浏览器直接输入 http://127.0.0.1:端口 即可访问。\n" +
+                                "2. 直连手机调试端口：在主控端使用开发工具或脚本直接连接手机上监听的端口 (如 scrcpy 视频套接字、JDWP 虚拟机调试端口、嵌入式数据库端口)。\n" +
+                                "3. 穿透手机内网：免去配置被控手机复杂路由或局域网放行的困扰。\n\n" +
+                                "【常用语法】tcp:端口 (如 tcp:8080) 或 localabstract:unix_socket_name",
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                // 2. Reverse 详细说明
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(8.dp)
+                        ) {}
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "2. ADB Reverse (反向代理)",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "【流量流向】被控端手机 ➡️ 控制端本机\n" +
+                                "【监听位置】被控手机系统内部 (由 adbd 守护进程负责监听)\n" +
+                                "【转发目标】回传至控制端本机对应的本地服务端口\n\n" +
+                                "【使用场景】\n" +
+                                "1. 跨端开发联调：手机运行 React Native 或 Flutter App，直接通过 127.0.0.1:8081 连接主控端电脑/手机上跑的 Metro Bundler 代码热重载服务。\n" +
+                                "2. Web 前端页面调试：手机端浏览器直接打开 http://127.0.0.1:3000 即可调试主控端本地运行的 Vite、Next.js 或 Webpack 开发预览。\n" +
+                                "3. 局域网防火墙穿透：无需手机与电脑在同一个 WiFi 网段，无视企业级路由器 AP 隔离限制，只要连上 ADB，手机访问 127.0.0.1 就能打到本机后端 API。\n\n" +
+                                "【常用语法】tcp:端口 (如 tcp:8081)",
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                // 3. 注意事项
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "📌 开发者使用须知：",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "• 建议本地端口使用非特权端口范围 (1024 ~ 65535)。\n" +
+                                    "• 端口映射与反向代理均依托 ADB 物理/网络连接，若会话断开，正向监听将关闭，反向代理规则可重新连接后再次配置。\n" +
+                                    "• Android 5.0 (Lollipop)+ 均已完整原生支持 ADB Reverse。",
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("我知道了")
+            }
+        }
+    )
+}
+
+/**
+ * 添加 Forward 正向映射弹窗
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AddForwardDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (localPort: Int, remoteSpec: String) -> Unit
+) {
+    var localPortText by remember { mutableStateOf("8080") }
+    var remoteSpecText by remember { mutableStateOf("tcp:8080") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val presetPorts = listOf(
+        Pair("8080", "Web服务"),
+        Pair("3000", "Node.js"),
+        Pair("5000", "Flask"),
+        Pair("8000", "Python"),
+        Pair("5555", "ADB端口")
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(Icons.Default.AltRoute, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+        },
+        title = {
+            Text("添加 Forward 正向映射", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "本机作为客户端监听端口，访问时将请求通过 ADB 转发至被控手机服务：",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = localPortText,
+                    onValueChange = {
+                        localPortText = it.filter { ch -> ch.isDigit() }
+                        errorMessage = null
+                    },
+                    label = { Text("本机监听端口 (Local Port)") },
+                    placeholder = { Text("例如 8080 (1024-65535)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                OutlinedTextField(
+                    value = remoteSpecText,
+                    onValueChange = {
+                        remoteSpecText = it
+                        errorMessage = null
+                    },
+                    label = { Text("远端目标 (Remote Spec)") },
+                    placeholder = { Text("例如 tcp:8080 或 localabstract:...") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                Text("快捷预设端口：", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    presetPorts.forEach { (port, label) ->
+                        SuggestionChip(
+                            onClick = {
+                                localPortText = port
+                                remoteSpecText = "tcp:$port"
+                            },
+                            label = { Text("$port ($label)", fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val port = localPortText.toIntOrNull()
+                    if (port == null || port < 1024 || port > 65535) {
+                        errorMessage = "请输入有效的本机端口 (1024 ~ 65535)"
+                        return@Button
+                    }
+                    if (remoteSpecText.isBlank()) {
+                        errorMessage = "请输入远端目标格式 (如 tcp:8080)"
+                        return@Button
+                    }
+                    onConfirm(port, remoteSpecText.trim())
+                    onDismiss()
+                },
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("启动映射")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+/**
+ * 添加 Reverse 反向代理弹窗
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AddReverseDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (remoteSpec: String, localSpec: String) -> Unit
+) {
+    var remotePortText by remember { mutableStateOf("8081") }
+    var localPortText by remember { mutableStateOf("8081") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val presetPorts = listOf(
+        Pair("8081", "React Native"),
+        Pair("3000", "React/Next.js"),
+        Pair("5173", "Vite"),
+        Pair("8080", "Web服务"),
+        Pair("8000", "Django/FastAPI")
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(Icons.Default.SwapHoriz, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+        },
+        title = {
+            Text("添加 Reverse 反向代理", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "手机 adbd 在自身开启端口监听，手机应用访问时逆向转发回控制端服务：",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = remotePortText,
+                    onValueChange = {
+                        remotePortText = it
+                        errorMessage = null
+                    },
+                    label = { Text("远端手机监听端口 (Remote Spec)") },
+                    placeholder = { Text("例如 tcp:8081 或 8081") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                OutlinedTextField(
+                    value = localPortText,
+                    onValueChange = {
+                        localPortText = it
+                        errorMessage = null
+                    },
+                    label = { Text("本机目标端口 (Local Spec)") },
+                    placeholder = { Text("例如 tcp:8081 或 8081") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                Text("快捷开发预设：", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    presetPorts.forEach { (port, label) ->
+                        SuggestionChip(
+                            onClick = {
+                                remotePortText = "tcp:$port"
+                                localPortText = "tcp:$port"
+                            },
+                            label = { Text("$port ($label)", fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val remote = if (!remotePortText.contains(":")) "tcp:${remotePortText.trim()}" else remotePortText.trim()
+                    val local = if (!localPortText.contains(":")) "tcp:${localPortText.trim()}" else localPortText.trim()
+                    if (remotePortText.isBlank()) {
+                        errorMessage = "请输入远端端口"
+                        return@Button
+                    }
+                    if (localPortText.isBlank()) {
+                        errorMessage = "请输入本机目标端口"
+                        return@Button
+                    }
+                    onConfirm(remote, local)
+                    onDismiss()
+                },
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("添加代理")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable
@@ -2066,6 +3302,12 @@ fun TouchpadCard(
     var touchpadHeightMode by remember { mutableStateOf(TouchpadHeightMode.STANDARD) }
 
     val virtualMouseStatus by viewModel.virtualMouseStatus.collectAsState()
+    val isTouchpadDragging by viewModel.isTouchpadDragging.collectAsState()
+    val coroutineScope = rememberCoroutineScope()
+    var pendingTapJob by remember { mutableStateOf<Job?>(null) }
+    var lastTapUpTime by remember { mutableLongStateOf(0L) }
+    var lastTapUpPos by remember { mutableStateOf(Offset.Zero) }
+    var isDoubleTapDragActive by remember { mutableStateOf(false) }
 
     // 远端虚拟光标屏幕坐标 (初始居中)
     var curX by remember(screenWidth) { mutableStateOf((screenWidth / 2).toFloat()) }
@@ -2085,7 +3327,7 @@ fun TouchpadCard(
         iconTint = Color(0xFF6366F1)
     ) {
         Text(
-            text = "滑动手指模拟鼠标移动或屏幕滑动手势，支持轻触点击、双击、长按及滚轮翻页。",
+            text = "滑动手指模拟鼠标移动或屏幕手势。电脑标准手势：双击不松手并移动即为按住拖拽 (左键按下移动)。",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -2335,69 +3577,125 @@ fun TouchpadCard(
                     shape = RoundedCornerShape(16.dp)
                 )
                 .pointerInput(mode, protocol, sensitivity, screenWidth, screenHeight) {
-                    detectTapGestures(
-                        onTap = {
-                            viewModel.sendTouchpadTap(
-                                curX.toInt(),
-                                curY.toInt(),
-                                useMouse = true
-                            )
-                        },
-                        onDoubleTap = {
-                            viewModel.sendTouchpadDoubleTap(curX.toInt(), curY.toInt())
-                        },
-                        onLongPress = {
-                            viewModel.sendTouchpadLongPress(curX.toInt(), curY.toInt())
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val downTime = System.currentTimeMillis()
+                        val downPos = down.position
+                        val touchSlop = viewConfiguration.touchSlop
+
+                        // 电脑触控板判定：距离上次轻触抬起在 350ms 内且距离在 60dp 范围内，视为双击手势序列
+                        val timeSinceLastTap = downTime - lastTapUpTime
+                        val distSinceLastTap = (downPos - lastTapUpPos).getDistance()
+                        val isSecondTap = timeSinceLastTap in 1..350L && distSinceLastTap < 60.dp.toPx()
+
+                        if (isSecondTap) {
+                            pendingTapJob?.cancel()
+                            pendingTapJob = null
                         }
-                    )
-                }
-                .pointerInput(mode, protocol, sensitivity, screenWidth, screenHeight) {
-                    detectDragGestures(
-                        onDragStart = {
-                            subPixelDx = 0f
-                            subPixelDy = 0f
-                            dragStartX = curX
-                            dragStartY = curY
-                        },
-                        onDrag = { change, dragAmount ->
-                            change.consume()
-                            // 为高分辨率屏幕适配平滑倍率系数 (1.8f 基础增益 + 用户灵敏度)，微小滑动毫秒级无损累加
-                            val scale = sensitivity * 1.8f
-                            subPixelDx += dragAmount.x * scale
-                            subPixelDy += dragAmount.y * scale
 
-                            val moveX = subPixelDx.toInt()
-                            val moveY = subPixelDy.toInt()
+                        var isPointerMoved = false
+                        var isDraggingWithMouse = false
+                        dragStartX = curX
+                        dragStartY = curY
+                        subPixelDx = 0f
+                        subPixelDy = 0f
 
-                            if (moveX != 0 || moveY != 0) {
-                                subPixelDx -= moveX
-                                subPixelDy -= moveY
+                        val pointerId = down.id
 
-                                curX = (curX + moveX).coerceIn(0f, screenWidth.toFloat())
-                                curY = (curY + moveY).coerceIn(0f, screenHeight.toFloat())
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val currentChange = event.changes.firstOrNull { it.id == pointerId } ?: break
 
-                                if (mode == TouchpadMode.MOUSE) {
-                                    viewModel.sendTouchpadMove(
-                                        x = curX.toInt(),
-                                        y = curY.toInt(),
-                                        dx = moveX,
-                                        dy = moveY,
-                                        protocol = protocol
-                                    )
+                            if (currentChange.pressed) {
+                                val delta = currentChange.position - currentChange.previousPosition
+                                val totalMovement = (currentChange.position - downPos).getDistance()
+
+                                if (!isPointerMoved && totalMovement > touchSlop) {
+                                    isPointerMoved = true
+                                    if (isSecondTap && mode == TouchpadMode.MOUSE) {
+                                        // 电脑触控板标准核心特性：双击不松手并移动，等于按下鼠标左键拖拽！
+                                        isDraggingWithMouse = true
+                                        isDoubleTapDragActive = true
+                                        viewModel.sendTouchpadMouseDown(curX.toInt(), curY.toInt())
+                                    }
                                 }
-                            }
-                        },
-                        onDragEnd = {
-                            if (mode == TouchpadMode.SWIPE) {
-                                viewModel.sendTouchpadSwipe(
-                                    x1 = dragStartX.toInt(),
-                                    y1 = dragStartY.toInt(),
-                                    x2 = curX.toInt(),
-                                    y2 = curY.toInt()
-                                )
+
+                                if (isPointerMoved) {
+                                    currentChange.consume()
+                                    val scale = sensitivity * 1.8f
+                                    subPixelDx += delta.x * scale
+                                    subPixelDy += delta.y * scale
+
+                                    val moveX = subPixelDx.toInt()
+                                    val moveY = subPixelDy.toInt()
+
+                                    if (moveX != 0 || moveY != 0) {
+                                        subPixelDx -= moveX
+                                        subPixelDy -= moveY
+
+                                        curX = (curX + moveX).coerceIn(0f, screenWidth.toFloat())
+                                        curY = (curY + moveY).coerceIn(0f, screenHeight.toFloat())
+
+                                        if (mode == TouchpadMode.MOUSE) {
+                                            viewModel.sendTouchpadMove(
+                                                x = curX.toInt(),
+                                                y = curY.toInt(),
+                                                dx = moveX,
+                                                dy = moveY,
+                                                protocol = protocol
+                                            )
+                                        }
+                                    }
+                                }
+                            } else {
+                                // 手指抬起 (UP)
+                                val upTime = System.currentTimeMillis()
+                                val tapDuration = upTime - downTime
+
+                                if (isDraggingWithMouse) {
+                                    // 双击拖拽结束：释放鼠标左键！
+                                    currentChange.consume()
+                                    viewModel.sendTouchpadMouseUp(curX.toInt(), curY.toInt())
+                                    isDraggingWithMouse = false
+                                    isDoubleTapDragActive = false
+                                    lastTapUpTime = 0L
+                                } else if (isPointerMoved) {
+                                    // 普通手势滑动结束
+                                    if (mode == TouchpadMode.SWIPE) {
+                                        viewModel.sendTouchpadSwipe(
+                                            x1 = dragStartX.toInt(),
+                                            y1 = dragStartY.toInt(),
+                                            x2 = curX.toInt(),
+                                            y2 = curY.toInt()
+                                        )
+                                    }
+                                    lastTapUpTime = 0L
+                                } else {
+                                    // 未滑动：轻触或长按
+                                    if (tapDuration >= viewConfiguration.longPressTimeoutMillis) {
+                                        viewModel.sendTouchpadLongPress(curX.toInt(), curY.toInt())
+                                        lastTapUpTime = 0L
+                                    } else if (isSecondTap) {
+                                        // 连续两次快速轻触且未拖动 -> 触发双击
+                                        viewModel.sendTouchpadDoubleTap(curX.toInt(), curY.toInt())
+                                        lastTapUpTime = 0L
+                                    } else {
+                                        // 首次轻触抬起：启动 220ms 延时计时器，若无第二次按下则触发单击
+                                        lastTapUpTime = upTime
+                                        lastTapUpPos = downPos
+                                        val tapX = curX.toInt()
+                                        val tapY = curY.toInt()
+                                        pendingTapJob = coroutineScope.launch {
+                                            delay(220L)
+                                            viewModel.sendTouchpadTap(tapX, tapY, useMouse = true)
+                                            lastTapUpTime = 0L
+                                        }
+                                    }
+                                }
+                                break
                             }
                         }
-                    )
+                    }
                 }
         ) {
             // 背景中央提示
@@ -2413,10 +3711,41 @@ fun TouchpadCard(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = if (mode == TouchpadMode.MOUSE) "在触控区滑动移动光标 · 单击 · 双击 · 长按拖拽" else "在触控区划动手势 · 松手时注入滑动手势",
+                    text = if (mode == TouchpadMode.MOUSE) "在触控区移动光标 · 轻触单击 · 双击 · 双击按住滑动即可按住拖拽" else "在触控区划动手势 · 松手时注入滑动手势",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                 )
+            }
+
+            // 拖拽激活状态悬浮指示横条
+            if (isDoubleTapDragActive || isTouchpadDragging) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF10B981).copy(alpha = 0.95f),
+                    shadowElevation = 3.dp,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Mouse,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "🖱️ 正在按住拖拽 (鼠标左键按下移动中)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
             }
         }
 
@@ -2427,10 +3756,10 @@ fun TouchpadCard(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // 第一行：鼠标核心主按键 (左键 & 右键)
+            // 第一行：鼠标核心主按键 (左键 & 拖拽锁定 & 右键)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
                     onClick = {
@@ -2441,14 +3770,43 @@ fun TouchpadCard(
                         )
                     },
                     shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp)
                 ) {
-                    Icon(Icons.Default.Mouse, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("鼠标左键 (单击)", fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                    Icon(Icons.Default.Mouse, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("左键(单击)", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                }
+
+                if (isTouchpadDragging) {
+                    Button(
+                        onClick = { viewModel.sendTouchpadMouseUp(curX.toInt(), curY.toInt()) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                    ) {
+                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("释放拖拽", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { viewModel.sendTouchpadMouseDown(curX.toInt(), curY.toInt()) },
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                    ) {
+                        Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("按住拖拽", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                    }
                 }
 
                 OutlinedButton(
@@ -2456,14 +3814,14 @@ fun TouchpadCard(
                         viewModel.sendTouchpadRightClick()
                     },
                     shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp),
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp)
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("鼠标右键 (返回)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("右键(返回)", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
                 }
             }
 

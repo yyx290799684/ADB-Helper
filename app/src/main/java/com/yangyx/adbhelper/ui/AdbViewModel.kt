@@ -14,6 +14,9 @@ import com.yangyx.adbhelper.adb.AdbConnection
 import com.yangyx.adbhelper.adb.AdbPairer
 import com.yangyx.adbhelper.adb.PairResult
 import com.yangyx.adbhelper.adb.AdbSyncClient
+import com.yangyx.adbhelper.adb.AdbForwardRule
+import com.yangyx.adbhelper.adb.AdbReverseRule
+import com.yangyx.adbhelper.adb.AdbPortForwardManager
 import com.yangyx.adbhelper.adb.DiscoveredAdbDevice
 import com.yangyx.adbhelper.adb.LanScanner
 import com.yangyx.adbhelper.adb.RemoteFileItem
@@ -42,7 +45,19 @@ import com.yangyx.adbhelper.ui.models.MediaPlaybackInfo
 import com.yangyx.adbhelper.ui.models.SystemInfo
 import com.yangyx.adbhelper.ui.models.TouchpadMode
 import com.yangyx.adbhelper.ui.models.TouchpadProtocol
+import com.yangyx.adbhelper.ui.models.ScreenRecordState
+import com.yangyx.adbhelper.ui.models.RemoteScreenshotResult
+import com.yangyx.adbhelper.ui.models.RemoteScreenRecordResult
 import com.yangyx.adbhelper.input.VirtualMouseManager
+import android.content.ContentValues
+import android.provider.MediaStore
+import android.os.Environment
+import android.widget.Toast
+import java.io.ByteArrayOutputStream
+import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.yangyx.adbhelper.input.VirtualMouseStatus
 import com.yangyx.adbhelper.widget.WidgetStateHolder
 import com.yangyx.adbhelper.widget.WidgetUpdateHelper
@@ -402,6 +417,18 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     // 虚拟硬件鼠标驱动管理器 (Linux UHID / UINPUT 原生硬件鼠标模拟，唤出原生指针)
     val virtualMouseManager = VirtualMouseManager({ activeConnection }, viewModelScope)
     val virtualMouseStatus: StateFlow<VirtualMouseStatus> = virtualMouseManager.status
+
+    // ADB 端口映射 (Forward) & 反向代理 (Reverse) 管理器
+    private val _forwardRules = MutableStateFlow<List<AdbForwardRule>>(emptyList())
+    val forwardRules: StateFlow<List<AdbForwardRule>> = _forwardRules.asStateFlow()
+
+    private val _reverseRules = MutableStateFlow<List<AdbReverseRule>>(emptyList())
+    val reverseRules: StateFlow<List<AdbReverseRule>> = _reverseRules.asStateFlow()
+
+    val forwardManager = AdbPortForwardManager(
+        connectionProvider = { activeConnection },
+        onRulesChanged = { rules -> _forwardRules.value = rules }
+    )
 
     // File Explorer state
     private val _currentRemotePath = MutableStateFlow("/sdcard")
@@ -1233,6 +1260,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         )
         WidgetStateHolder.onConnected(session, session.deviceName, "${session.ip}:${session.port}", _sessions.value.size)
         WidgetUpdateHelper.updateAllWidgets(getApplication())
+        fetchReverseRules()
     }
 
     /**
@@ -1364,6 +1392,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 _connectionState.value = ConnectionState.Disconnected
                 com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
                 resetDeviceSessionStates("", "未连接")
+                forwardManager.stopAllForwards()
+                _reverseRules.value = emptyList()
                 _actionMessage.value = "已断开连接并终止所有会话"
             }
         } else {
@@ -1907,6 +1937,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             activeConnection = null
             _connectionState.value = ConnectionState.Disconnected
             resetDeviceSessionStates("", "未连接")
+            forwardManager.stopAllForwards()
+            _reverseRules.value = emptyList()
         }
     }
 
@@ -1927,6 +1959,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         activeConnection = null
         _connectionState.value = ConnectionState.Disconnected
         resetDeviceSessionStates("", "未连接")
+        forwardManager.stopAllForwards()
+        _reverseRules.value = emptyList()
     }
 
     fun rebootDevice(option: com.yangyx.adbhelper.ui.models.RebootOption, onFinished: (() -> Unit)? = null) {
@@ -1946,6 +1980,119 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             kotlinx.coroutines.delay(1200)
             disconnect()
             onFinished?.invoke()
+        }
+    }
+
+    /**
+     * 添加 ADB forward 本地正向端口映射 (如 本地:8080 -> 远程:tcp:8080)
+     */
+    fun addForwardRule(localPort: Int, remoteSpec: String) {
+        if (activeConnection == null) {
+            _actionMessage.value = "当前未连接 ADB 设备"
+            return
+        }
+        val result = forwardManager.startForward(localPort, remoteSpec)
+        if (result.isSuccess) {
+            _actionMessage.value = "已启动端口映射: 本机 127.0.0.1:$localPort -> 远端 $remoteSpec"
+        } else {
+            _actionMessage.value = "端口映射启动失败: ${result.exceptionOrNull()?.message ?: "未知错误"}"
+        }
+    }
+
+    /**
+     * 移除指定的 ADB forward 本地端口映射
+     */
+    fun removeForwardRule(ruleId: String) {
+        forwardManager.stopForward(ruleId)
+        _actionMessage.value = "已停止并移除端口映射"
+    }
+
+    /**
+     * 停止所有本地 forward 端口映射
+     */
+    fun stopAllForwardRules() {
+        forwardManager.stopAllForwards()
+        _actionMessage.value = "已停止所有本地端口映射"
+    }
+
+    /**
+     * 查询被控端活跃的 ADB reverse 反向代理规则列表
+     */
+    fun fetchReverseRules() {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val rules = conn.reverseListForward()
+                _reverseRules.value = rules
+            } catch (e: Exception) {
+                Log.w("AdbViewModel", "Failed to query reverse rules: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 添加 ADB reverse 反向代理规则 (让远端设备访问本机服务)
+     */
+    fun addReverseRule(remoteSpec: String, localSpec: String) {
+        val conn = activeConnection
+        if (conn == null) {
+            _actionMessage.value = "当前未连接 ADB 设备"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = conn.reverseForward(remoteSpec, localSpec)
+            withContext(Dispatchers.Main) {
+                if (result.isSuccess) {
+                    _actionMessage.value = "已成功添加反向代理: 远端 $remoteSpec -> 本机 $localSpec"
+                    fetchReverseRules()
+                } else {
+                    _actionMessage.value = "添加反向代理失败: ${result.exceptionOrNull()?.message ?: "被控端 adbd 拒绝"}"
+                }
+            }
+        }
+    }
+
+    /**
+     * 移除指定的 ADB reverse 反向代理规则
+     */
+    fun removeReverseRule(remoteSpec: String) {
+        val conn = activeConnection
+        if (conn == null) {
+            _actionMessage.value = "当前未连接 ADB 设备"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = conn.reverseKillForward(remoteSpec)
+            withContext(Dispatchers.Main) {
+                if (result.isSuccess) {
+                    _actionMessage.value = "已移除反向代理: $remoteSpec"
+                    fetchReverseRules()
+                } else {
+                    _actionMessage.value = "移除反向代理失败: ${result.exceptionOrNull()?.message ?: "未知错误"}"
+                }
+            }
+        }
+    }
+
+    /**
+     * 清空被控端所有的 ADB reverse 反向代理规则
+     */
+    fun removeAllReverseRules() {
+        val conn = activeConnection
+        if (conn == null) {
+            _actionMessage.value = "当前未连接 ADB 设备"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = conn.reverseKillForwardAll()
+            withContext(Dispatchers.Main) {
+                if (result.isSuccess) {
+                    _actionMessage.value = "已清空所有反向代理规则"
+                    fetchReverseRules()
+                } else {
+                    _actionMessage.value = "清空反向代理失败: ${result.exceptionOrNull()?.message ?: "未知错误"}"
+                }
+            }
         }
     }
 
@@ -2858,6 +3005,399 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 _actionMessage.value = "滑动失败: ${e.message}"
             }
+        }
+    }
+
+    // 触控板双击拖拽 / 鼠标按住拖拽状态
+    private var isTouchpadMouseDown = false
+    private var touchpadDragStartX = 0
+    private var touchpadDragStartY = 0
+    private val _isTouchpadDragging = MutableStateFlow(false)
+    val isTouchpadDragging: StateFlow<Boolean> = _isTouchpadDragging.asStateFlow()
+
+    /**
+     * 触控板按下鼠标左键 (进入拖拽选择/移动状态)
+     */
+    fun sendTouchpadMouseDown(x: Int, y: Int) {
+        isTouchpadMouseDown = true
+        touchpadDragStartX = x
+        touchpadDragStartY = y
+        _isTouchpadDragging.value = true
+
+        if (virtualMouseStatus.value is VirtualMouseStatus.Disconnected) {
+            virtualMouseManager.connect()
+        }
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            virtualMouseManager.pressButton(1)
+        }
+    }
+
+    /**
+     * 触控板释放鼠标左键 (结束拖拽选择/移动状态)
+     */
+    fun sendTouchpadMouseUp(x: Int, y: Int) {
+        if (!isTouchpadMouseDown) return
+        isTouchpadMouseDown = false
+        _isTouchpadDragging.value = false
+
+        if (virtualMouseStatus.value is VirtualMouseStatus.Connected) {
+            virtualMouseManager.releaseButton(1)
+        } else {
+            // 回退兼容：非原生鼠标驱动模式下，若产生了滑动位移，通过 input swipe 注入拖动
+            val dx = kotlin.math.abs(x - touchpadDragStartX)
+            val dy = kotlin.math.abs(y - touchpadDragStartY)
+            if (dx > 10 || dy > 10) {
+                sendTouchpadSwipe(touchpadDragStartX, touchpadDragStartY, x, y, 350)
+            }
+        }
+    }
+
+    // 远程截图与屏幕录制状态
+    private val _isCapturingScreenshot = MutableStateFlow(false)
+    val isCapturingScreenshot: StateFlow<Boolean> = _isCapturingScreenshot.asStateFlow()
+
+    private val _pendingScreenshotDialog = MutableStateFlow<RemoteScreenshotResult?>(null)
+    val pendingScreenshotDialog: StateFlow<RemoteScreenshotResult?> = _pendingScreenshotDialog.asStateFlow()
+
+    private val _screenRecordState = MutableStateFlow(ScreenRecordState.IDLE)
+    val screenRecordState: StateFlow<ScreenRecordState> = _screenRecordState.asStateFlow()
+
+    private val _screenRecordDurationSeconds = MutableStateFlow(0)
+    val screenRecordDurationSeconds: StateFlow<Int> = _screenRecordDurationSeconds.asStateFlow()
+
+    private val _pendingScreenRecordDialog = MutableStateFlow<RemoteScreenRecordResult?>(null)
+    val pendingScreenRecordDialog: StateFlow<RemoteScreenRecordResult?> = _pendingScreenRecordDialog.asStateFlow()
+
+    private val _isDownloadingScreenRecord = MutableStateFlow(false)
+    val isDownloadingScreenRecord: StateFlow<Boolean> = _isDownloadingScreenRecord.asStateFlow()
+
+    private var activeScreenRecordStream: com.yangyx.adbhelper.adb.AdbStream? = null
+    private var screenRecordTimerJob: Job? = null
+    private var currentScreenRecordPath: String = ""
+    private var currentScreenRecordTimestamp: String = ""
+
+    /**
+     * 远程屏幕截图：在被控端截取一张屏幕画面，拉取并弹出下载提示
+     */
+    fun takeRemoteScreenshot(context: Context) {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备，无法执行截图"
+            return
+        }
+        if (_isCapturingScreenshot.value) return
+        _isCapturingScreenshot.value = true
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                val remoteDir = "/sdcard/Pictures/Screenshots"
+                val remotePath = "$remoteDir/screencap_$timestamp.png"
+
+                conn.executeShell("mkdir -p $remoteDir 2>/dev/null")
+                val capResult = conn.executeShell("screencap -p $remotePath 2>/dev/null; if [ -f $remotePath ]; then echo OK; else echo FAIL; fi").trim()
+
+                val targetRemotePath = if (capResult.contains("OK")) {
+                    remotePath
+                } else {
+                    val fallbackPath = "/data/local/tmp/screencap_$timestamp.png"
+                    conn.executeShell("screencap -p $fallbackPath 2>/dev/null")
+                    fallbackPath
+                }
+
+                val baos = ByteArrayOutputStream()
+                val syncClient = AdbSyncClient(conn)
+                syncClient.pullFile(targetRemotePath, baos)
+                val bytes = baos.toByteArray()
+
+                if (bytes.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        _pendingScreenshotDialog.value = RemoteScreenshotResult(
+                            remotePath = targetRemotePath,
+                            localBytes = bytes,
+                            timestamp = timestamp,
+                            fileSizeBytes = bytes.size.toLong()
+                        )
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        _actionMessage.value = "截图获取失败：未接收到图像数据"
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _actionMessage.value = "截图执行失败: ${e.message}"
+                }
+            } finally {
+                _isCapturingScreenshot.value = false
+            }
+        }
+    }
+
+    /**
+     * 将远程截图下载保存至控制端本地相册
+     */
+    fun downloadScreenshotToLocal(context: Context, result: RemoteScreenshotResult) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val fileName = "screencap_${result.timestamp}.png"
+                val uri = saveImageToMediaStore(context, result.localBytes, fileName)
+                withContext(Dispatchers.Main) {
+                    if (uri != null) {
+                        _actionMessage.value = "✅ 截图已保存至本地相册 (Pictures/ADBHelper)"
+                        Toast.makeText(context, "✅ 截图已保存至本地系统相册 Pictures/ADBHelper", Toast.LENGTH_SHORT).show()
+                    } else {
+                        _actionMessage.value = "保存失败，请检查系统存储权限"
+                    }
+                    _pendingScreenshotDialog.value = null
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _actionMessage.value = "下载保存截图失败: ${e.message}"
+                }
+            }
+        }
+    }
+
+    fun dismissScreenshotDialog() {
+        _pendingScreenshotDialog.value = null
+    }
+
+    /**
+     * 开始远程屏幕录制
+     */
+    fun startRemoteScreenRecord() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备，无法开始录屏"
+            return
+        }
+        if (_screenRecordState.value != ScreenRecordState.IDLE) return
+
+        _screenRecordState.value = ScreenRecordState.RECORDING
+        _screenRecordDurationSeconds.value = 0
+
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        currentScreenRecordTimestamp = timestamp
+        val remoteDir = "/sdcard/Movies/Screenrecords"
+        val remotePath = "$remoteDir/record_$timestamp.mp4"
+        currentScreenRecordPath = remotePath
+
+        // 启动秒级计时器
+        screenRecordTimerJob?.cancel()
+        screenRecordTimerJob = viewModelScope.launch(Dispatchers.Main) {
+            while (isActive && _screenRecordState.value == ScreenRecordState.RECORDING) {
+                delay(1000L)
+                _screenRecordDurationSeconds.value += 1
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                conn.executeShell("mkdir -p $remoteDir 2>/dev/null")
+                val stream = conn.openStream("shell:screenrecord --time-limit 1800 $remotePath")
+                activeScreenRecordStream = stream
+
+                while (!stream.isClosed && isActive && _screenRecordState.value == ScreenRecordState.RECORDING) {
+                    stream.read(1000L)
+                    if (stream.isClosed) break
+                }
+
+                if (_screenRecordState.value == ScreenRecordState.RECORDING) {
+                    withContext(Dispatchers.Main) {
+                        stopRemoteScreenRecordInternal()
+                    }
+                }
+            } catch (e: Exception) {
+                if (_screenRecordState.value == ScreenRecordState.RECORDING) {
+                    withContext(Dispatchers.Main) {
+                        _actionMessage.value = "录屏连接中断: ${e.message}"
+                        _screenRecordState.value = ScreenRecordState.IDLE
+                        screenRecordTimerJob?.cancel()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 结束远程屏幕录制，并弹出下载到本地提示
+     */
+    fun stopRemoteScreenRecord(context: Context) {
+        if (_screenRecordState.value != ScreenRecordState.RECORDING) return
+        stopRemoteScreenRecordInternal()
+    }
+
+    private fun stopRemoteScreenRecordInternal() {
+        _screenRecordState.value = ScreenRecordState.STOPPING
+        screenRecordTimerJob?.cancel()
+        val conn = activeConnection
+        val targetPath = currentScreenRecordPath
+        val timestamp = currentScreenRecordTimestamp
+        val duration = _screenRecordDurationSeconds.value
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                try {
+                    activeScreenRecordStream?.write(byteArrayOf(0x03))
+                } catch (_: Exception) {}
+
+                conn?.executeShell("pkill -2 screenrecord 2>/dev/null || kill -2 $(pidof screenrecord) 2>/dev/null")
+                delay(1500L)
+                try {
+                    activeScreenRecordStream?.close()
+                } catch (_: Exception) {}
+                activeScreenRecordStream = null
+
+                var fileSizeBytes = 0L
+                if (conn != null && targetPath.isNotBlank()) {
+                    val lsOutput = conn.executeShell("ls -l $targetPath 2>/dev/null").trim()
+                    val parts = lsOutput.split(Regex("\\s+"))
+                    if (parts.size >= 4) {
+                        fileSizeBytes = parts.getOrNull(3)?.toLongOrNull() ?: parts.getOrNull(4)?.toLongOrNull() ?: 0L
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    _screenRecordState.value = ScreenRecordState.IDLE
+                    _pendingScreenRecordDialog.value = RemoteScreenRecordResult(
+                        remotePath = targetPath,
+                        durationSeconds = duration,
+                        fileSizeBytes = fileSizeBytes,
+                        timestamp = timestamp
+                    )
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _screenRecordState.value = ScreenRecordState.IDLE
+                    _actionMessage.value = "停止录屏失败: ${e.message}"
+                }
+            }
+        }
+    }
+
+    /**
+     * 取消远程录屏（不保存）
+     */
+    fun cancelRemoteScreenRecord() {
+        screenRecordTimerJob?.cancel()
+        val conn = activeConnection
+        val targetPath = currentScreenRecordPath
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                activeScreenRecordStream?.write(byteArrayOf(0x03))
+            } catch (_: Exception) {}
+            conn?.executeShell("pkill -2 screenrecord 2>/dev/null || kill -2 $(pidof screenrecord) 2>/dev/null")
+            try {
+                activeScreenRecordStream?.close()
+            } catch (_: Exception) {}
+            activeScreenRecordStream = null
+            if (targetPath.isNotBlank()) {
+                conn?.executeShell("rm -f $targetPath 2>/dev/null")
+            }
+            withContext(Dispatchers.Main) {
+                _screenRecordState.value = ScreenRecordState.IDLE
+                _screenRecordDurationSeconds.value = 0
+                _actionMessage.value = "已取消屏幕录制"
+            }
+        }
+    }
+
+    /**
+     * 将远程录屏文件下载保存至控制端本地视频库
+     */
+    fun downloadScreenRecordToLocal(context: Context, result: RemoteScreenRecordResult) {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备，无法下载录屏"
+            return
+        }
+        if (_isDownloadingScreenRecord.value) return
+        _isDownloadingScreenRecord.value = true
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val fileName = "record_${result.timestamp}.mp4"
+                var success = false
+                saveVideoToMediaStore(context, fileName) { outputStream ->
+                    val syncClient = AdbSyncClient(conn)
+                    syncClient.pullFile(result.remotePath, outputStream)
+                    success = true
+                }
+
+                withContext(Dispatchers.Main) {
+                    _isDownloadingScreenRecord.value = false
+                    _pendingScreenRecordDialog.value = null
+                    if (success) {
+                        _actionMessage.value = "✅ 录屏视频已保存至本地视频库 (Movies/ADBHelper)"
+                        Toast.makeText(context, "✅ 录屏视频已保存至本地视频库 Movies/ADBHelper", Toast.LENGTH_SHORT).show()
+                    } else {
+                        _actionMessage.value = "下载录屏失败"
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _isDownloadingScreenRecord.value = false
+                    _actionMessage.value = "下载录屏失败: ${e.message}"
+                }
+            }
+        }
+    }
+
+    fun dismissScreenRecordDialog() {
+        _pendingScreenRecordDialog.value = null
+    }
+
+    private fun saveImageToMediaStore(context: Context, bytes: ByteArray, fileName: String): Uri? {
+        return try {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ADBHelper")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+            }
+            val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            if (uri != null) {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(bytes)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    context.contentResolver.update(uri, contentValues, null, null)
+                }
+            }
+            uri
+        } catch (e: Exception) {
+            Log.e("AdbViewModel", "saveImageToMediaStore failed", e)
+            null
+        }
+    }
+
+    private fun saveVideoToMediaStore(context: Context, fileName: String, writeBlock: (OutputStream) -> Unit): Uri? {
+        return try {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/ADBHelper")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+            }
+            val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
+            if (uri != null) {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    writeBlock(out)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Video.Media.IS_PENDING, 0)
+                    context.contentResolver.update(uri, contentValues, null, null)
+                }
+            }
+            uri
+        } catch (e: Exception) {
+            Log.e("AdbViewModel", "saveVideoToMediaStore failed", e)
+            null
         }
     }
 

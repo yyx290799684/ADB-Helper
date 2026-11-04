@@ -63,7 +63,9 @@ object WidgetStateHolder {
     @Volatile
     var recentDevices: List<WidgetDeviceInfo> = emptyList()
 
-    private var activeSessionRef: WeakReference<AdbDeviceSession>? = null
+    @Volatile
+    var activeSession: AdbDeviceSession? = null
+        private set
 
     const val SCAN_EXPIRATION_MILLIS = 10 * 60 * 1000L // 10分钟扫描有效期
 
@@ -75,18 +77,17 @@ object WidgetStateHolder {
     var lastConnectedCheckTimestamp: Long = 0L
         private set
 
-    val activeSession: AdbDeviceSession?
-        get() = activeSessionRef?.get()
-
     val activeConnection: AdbConnection?
-        get() = activeSession?.connection
+        get() = activeSession?.connection ?: com.yangyx.adbhelper.ui.AdbViewModel.currentInstance?.let { vm ->
+            vm.currentSession?.connection ?: vm.sessions.value.firstOrNull()?.connection
+        }
 
     fun onConnected(session: AdbDeviceSession?, name: String, ip: String, count: Int = 1) {
         currentState = State.CONNECTED
         deviceName = name
         deviceIp = ip
         connectedDeviceCount = count
-        activeSessionRef = session?.let { WeakReference(it) }
+        activeSession = session
         lastConnectedCheckTimestamp = System.currentTimeMillis()
     }
 
@@ -99,7 +100,7 @@ object WidgetStateHolder {
     fun onDisconnected() {
         currentState = State.DISCONNECTED
         connectedDeviceCount = 0
-        activeSessionRef = null
+        activeSession = null
         lastConnectedCheckTimestamp = 0L
     }
 

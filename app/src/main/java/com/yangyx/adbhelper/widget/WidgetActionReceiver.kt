@@ -9,6 +9,7 @@ import android.widget.Toast
 import android.app.Application
 import com.yangyx.adbhelper.MainActivity
 import com.yangyx.adbhelper.ui.AdbViewModel
+import com.yangyx.adbhelper.ui.ConnectionState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -192,29 +193,73 @@ class WidgetActionReceiver : BroadcastReceiver() {
                             WidgetUpdateHelper.updateAllWidgets(context)
                         }
 
-                        // 2. 检查已连接设备连接状态，每 10 分钟检测一次，若已掉线则自动恢复连接前界面
+                        // 2. 检查已连接设备连接状态：只有确实断开且 IP 端口不可达（无法自动恢复）才切回未连接状态
                         if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
-                            val conn = WidgetStateHolder.activeConnection
-                            val isAlive = try {
-                                if (conn == null || !conn.isConnected) {
-                                    false
-                                } else {
-                                    conn.isConnectionAlive(3000)
-                                }
-                            } catch (_: Exception) {
-                                false
-                            }
+                            val vm = AdbViewModel.currentInstance
+                            val vmSession = vm?.currentSession ?: vm?.sessions?.value?.firstOrNull()
+                            val activeSession = WidgetStateHolder.activeSession ?: vmSession
+                            val conn = activeSession?.connection ?: WidgetStateHolder.activeConnection
 
-                            if (!isAlive) {
-                                // 设备已掉线，恢复连接前界面
-                                AdbViewModel.currentInstance?.disconnectCurrentSession()
-                                WidgetStateHolder.onDisconnected()
-                                com.yangyx.adbhelper.service.AdbSessionService.stopService(context)
-                                WidgetUpdateHelper.updateAllWidgets(context)
-                                WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(context)
-                            } else {
-                                // 仍然在线，安排下一次 10 分钟检测
+                            // 优先判断：若 App 内会话仍然保持已连接状态，则小部件必须保持已连接
+                            val isAppConnected = vm != null &&
+                                    vm.connectionState.value is ConnectionState.Connected &&
+                                    vmSession?.connection?.isConnected == true
+
+                            val isConnAlive = conn != null && conn.isConnectionAlive()
+
+                            if (isAppConnected || isConnAlive) {
+                                if (isAppConnected && vmSession != null && WidgetStateHolder.activeSession == null) {
+                                    WidgetStateHolder.onConnected(vmSession, vmSession.deviceName, "${vmSession.ip}:${vmSession.port}", vm.sessions.value.size)
+                                }
                                 WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
+                            } else {
+                                // 会话暂不可用，进一步检测目标 IP 与端口是否可达
+                                val rawAddress = WidgetStateHolder.deviceIp
+                                val targetIp = conn?.ip?.ifBlank { null }
+                                    ?: activeSession?.ip?.ifBlank { null }
+                                    ?: rawAddress.substringBefore(":").ifBlank { "" }
+                                val targetPort = conn?.port?.takeIf { it > 0 }
+                                    ?: activeSession?.port?.takeIf { it > 0 }
+                                    ?: (rawAddress.substringAfter(":", "5555").toIntOrNull() ?: 5555)
+
+                                val isUsb = conn?.isUsb == true || activeSession?.connection?.isUsb == true
+                                val isReachable = if (isUsb) {
+                                    conn?.usbConnection != null
+                                } else if (targetIp.isNotBlank()) {
+                                    WidgetUpdateHelper.isPortReachable(targetIp, targetPort, timeoutMs = 2500)
+                                } else {
+                                    false
+                                }
+
+                                if (isReachable) {
+                                    // IP 端口可达，尝试自动重连恢复会话，暂不回到未连接状态
+                                    val reconnected = conn?.ensureConnected(3000) ?: false
+                                    if (reconnected && activeSession != null) {
+                                        WidgetStateHolder.onConnected(activeSession, activeSession.deviceName, "${activeSession.ip}:${activeSession.port}")
+                                    }
+                                    WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
+                                } else {
+                                    // 延迟 1.5 秒进行二次复检，防止瞬时网络抖动
+                                    kotlinx.coroutines.delay(1500L)
+                                    val secondReachable = if (isUsb) {
+                                        conn?.usbConnection != null
+                                    } else if (targetIp.isNotBlank()) {
+                                        WidgetUpdateHelper.isPortReachable(targetIp, targetPort, timeoutMs = 2500)
+                                    } else {
+                                        false
+                                    }
+
+                                    if (!secondReachable) {
+                                        // 确实连接断了且 IP 端口不可达（无法自动恢复连接），恢复到未连接状态
+                                        AdbViewModel.currentInstance?.disconnectCurrentSession()
+                                        WidgetStateHolder.onDisconnected()
+                                        com.yangyx.adbhelper.service.AdbSessionService.stopService(context)
+                                        WidgetUpdateHelper.updateAllWidgets(context)
+                                        WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(context)
+                                    } else {
+                                        WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
+                                    }
+                                }
                             }
                         }
                     }

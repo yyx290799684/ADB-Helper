@@ -205,6 +205,32 @@ object WidgetUpdateHelper {
         } catch (_: Exception) {}
     }
 
+    fun isPortReachable(ip: String, port: Int, timeoutMs: Int = 2500): Boolean {
+        if (ip.isBlank() || port <= 0) return false
+        return try {
+            java.net.Socket().use { s ->
+                s.connect(java.net.InetSocketAddress(ip, port), timeoutMs)
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun syncWithActiveAppConnection() {
+        val vm = com.yangyx.adbhelper.ui.AdbViewModel.currentInstance
+        if (vm != null) {
+            val vmSession = vm.currentSession ?: vm.sessions.value.firstOrNull()
+            if (vmSession != null && vmSession.connection.isConnected) {
+                if (WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTED) {
+                    WidgetStateHolder.onConnected(vmSession, vmSession.deviceName, "${vmSession.ip}:${vmSession.port}", vm.sessions.value.size)
+                }
+            } else if (vm.connectionState.value is com.yangyx.adbhelper.ui.ConnectionState.Disconnected && WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
+                WidgetStateHolder.onDisconnected()
+            }
+        }
+    }
+
     fun updateAllWidgets(context: Context) {
         helperScope.launch {
             ensureFallbackDeviceInfo(context)
@@ -355,13 +381,8 @@ object WidgetUpdateHelper {
                 }
             }
 
-            // 检查已连接设备连接状态，若已断开则自动恢复断开前状态
-            if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
-                val active = WidgetStateHolder.activeConnection
-                if (active == null || !active.isConnected) {
-                    WidgetStateHolder.onDisconnected()
-                }
-            }
+            // 同步应用前台与活跃 ADB 会话连接状态
+            syncWithActiveAppConnection()
 
             // 检查扫描结果是否超过 10 分钟有效期
             if (WidgetStateHolder.checkAndExpireScan()) {
@@ -378,12 +399,7 @@ object WidgetUpdateHelper {
     }
 
     fun build2x2Views(context: Context): RemoteViews {
-        if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
-            val active = WidgetStateHolder.activeConnection
-            if (active == null || !active.isConnected) {
-                WidgetStateHolder.onDisconnected()
-            }
-        }
+        syncWithActiveAppConnection()
         val views = RemoteViews(context.packageName, R.layout.widget_quick_2x2)
         val state = WidgetStateHolder.currentState
         var recents = WidgetStateHolder.recentDevices
@@ -517,12 +533,7 @@ object WidgetUpdateHelper {
     }
 
     fun build4x2Views(context: Context): RemoteViews {
-        if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
-            val active = WidgetStateHolder.activeConnection
-            if (active == null || !active.isConnected) {
-                WidgetStateHolder.onDisconnected()
-            }
-        }
+        syncWithActiveAppConnection()
         if (WidgetStateHolder.checkAndExpireScan()) {
             clearScannedDevicesCache(context)
         }

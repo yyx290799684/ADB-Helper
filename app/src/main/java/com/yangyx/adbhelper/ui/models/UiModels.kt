@@ -239,5 +239,40 @@ enum class TouchpadProtocol(val title: String, val commandDesc: String) {
     ROLL("trackball roll", "adb shell input roll <dx> <dy>")
 }
 
+enum class ScreenRecordState {
+    IDLE,
+    RECORDING,
+    STOPPING
+}
+
+@Immutable
+data class RemoteScreenshotResult(
+    val remotePath: String,
+    val localBytes: ByteArray,
+    val timestamp: String,
+    val fileSizeBytes: Long
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is RemoteScreenshotResult) return false
+        return remotePath == other.remotePath && timestamp == other.timestamp
+    }
+
+    override fun hashCode(): Int {
+        var result = remotePath.hashCode()
+        result = 31 * result + timestamp.hashCode()
+        return result
+    }
+}
+
+@Immutable
+data class RemoteScreenRecordResult(
+    val remotePath: String,
+    val durationSeconds: Int,
+    val fileSizeBytes: Long,
+    val timestamp: String
+)
+
+
 
 
