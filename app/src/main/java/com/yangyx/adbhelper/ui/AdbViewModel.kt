@@ -1816,6 +1816,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteSingleIp(device: DeviceEntity) {
         viewModelScope.launch(Dispatchers.IO) {
             WidgetUpdateHelper.removeDeletedDevice(getApplication(), device.serialNo, setOf(device.ipAddress))
+            val editor = devicePrefs.edit()
+            if (device.id != 0L) {
+                editor.remove("manual_order_id_${device.id}")
+            }
+            editor.remove("manual_order_ip_${device.ipAddress}_${device.port}")
+            editor.commit()
+
             if (device.id != 0L) {
                 repository.deleteDeviceById(device.id)
             } else {
@@ -1843,7 +1850,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 editor.remove("manual_order_ip_${record.ipAddress}_${record.port}")
             }
-            editor.apply()
+            editor.commit()
 
             if (group.serialNo.isNotBlank()) {
                 repository.deleteDevicesBySerialNo(group.serialNo)
@@ -3487,6 +3494,9 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteDeviceFromHistory(ip: String) {
         viewModelScope.launch(Dispatchers.IO) {
             WidgetUpdateHelper.removeDeletedDevice(getApplication(), "", setOf(ip))
+            val editor = devicePrefs.edit()
+            editor.remove("manual_order_ip_$ip")
+            editor.commit()
             repository.deleteDevice(ip)
             WidgetUpdateHelper.updateAllWidgets(getApplication())
         }

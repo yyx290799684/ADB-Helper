@@ -23,6 +23,11 @@ class AdbRepository(
     suspend fun checkAndRestoreBackupIfNeeded() {
         if (prefs == null) return
         try {
+            val userClearedAll = prefs?.getBoolean("user_cleared_all_devices", false) ?: false
+            if (userClearedAll) {
+                // 用户已主动清空/删除了全部历史设备，绝不执行自动恢复
+                return
+            }
             val current = deviceDao.getAllDevicesDirect()
             if (current.isEmpty()) {
                 val backupJson = prefs?.getString("saved_devices_json", "") ?: ""
@@ -46,7 +51,16 @@ class AdbRepository(
             val devices = deviceDao.getAllDevicesDirect()
             if (devices.isNotEmpty()) {
                 val json = serializeDevicesToJson(devices)
-                prefs?.edit()?.putString("saved_devices_json", json)?.apply()
+                prefs?.edit()
+                    ?.putString("saved_devices_json", json)
+                    ?.putBoolean("user_cleared_all_devices", false)
+                    ?.commit()
+            } else {
+                // 当数据库已无任何设备记录时，彻底清空备份 JSON 并标记用户已全部删除，防止重启后幽灵恢复
+                prefs?.edit()
+                    ?.remove("saved_devices_json")
+                    ?.putBoolean("user_cleared_all_devices", true)
+                    ?.commit()
             }
         } catch (_: Exception) {}
     }
