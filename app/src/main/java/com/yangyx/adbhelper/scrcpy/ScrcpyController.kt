@@ -568,26 +568,48 @@ class ScrcpyController(
 
                 // 5. Calculate stream dimensions
                 val maxRes = if (cfg.maxResolution > 0) cfg.maxResolution else 0
-                val isPortrait = nativeHeight >= nativeWidth
-                val aspect = if (nativeHeight > 0 && nativeWidth > 0) {
-                    if (isPortrait) nativeHeight.toFloat() / nativeWidth.toFloat() else nativeWidth.toFloat() / nativeHeight.toFloat()
-                } else 2.2f
 
-                val (renderW, renderH) = when {
-                    maxRes == 0 -> {
-                        val w = if (nativeWidth > 0) nativeWidth else 720
-                        val h = if (nativeHeight > 0) nativeHeight else 1600
-                        (w and 0xFFFE) to (h and 0xFFFE)
+                val (renderW, renderH) = if (isCamera) {
+                    // 相机镜像模式：Android 手机 Camera2 摄像头传感器硬件输出永远是横向分辨率（Landscape，例如 1920x1080、1280x720 或 4:3 画幅的 1440x1080）。
+                    // 绝不能套用手机屏幕的超长竖屏比例（如 1080x2400 或 2.2:1），否则会导致相机画面被极度压缩压扁。
+                    if (cfg.cameraSize.isNotBlank()) {
+                        val parts = cfg.cameraSize.trim().split("x", "X")
+                        val cw = parts.getOrNull(0)?.toIntOrNull() ?: 1920
+                        val ch = parts.getOrNull(1)?.toIntOrNull() ?: 1080
+                        (cw and 0xFFFE) to (ch and 0xFFFE)
+                    } else {
+                        val is43 = cfg.cameraAspectRatio.trim().equals("4:3", ignoreCase = true)
+                        val targetAspect = if (is43) (4f / 3f) else (16f / 9f)
+                        if (maxRes > 0) {
+                            val w = maxRes and 0xFFFE
+                            val h = ((w / targetAspect).toInt()) and 0xFFFE
+                            w to h
+                        } else {
+                            if (is43) (1440 to 1080) else (1920 to 1080)
+                        }
                     }
-                    isPortrait -> {
-                        val h = maxRes and 0xFFFE
-                        val w = (h / aspect).toInt() and 0xFFFE
-                        w to h
-                    }
-                    else -> {
-                        val w = maxRes and 0xFFFE
-                        val h = (w / aspect).toInt() and 0xFFFE
-                        w to h
+                } else {
+                    val isPortrait = nativeHeight >= nativeWidth
+                    val aspect = if (nativeHeight > 0 && nativeWidth > 0) {
+                        if (isPortrait) nativeHeight.toFloat() / nativeWidth.toFloat() else nativeWidth.toFloat() / nativeHeight.toFloat()
+                    } else 2.2f
+
+                    when {
+                        maxRes == 0 -> {
+                            val w = if (nativeWidth > 0) nativeWidth else 720
+                            val h = if (nativeHeight > 0) nativeHeight else 1600
+                            (w and 0xFFFE) to (h and 0xFFFE)
+                        }
+                        isPortrait -> {
+                            val h = maxRes and 0xFFFE
+                            val w = (h / aspect).toInt() and 0xFFFE
+                            w to h
+                        }
+                        else -> {
+                            val w = maxRes and 0xFFFE
+                            val h = (w / aspect).toInt() and 0xFFFE
+                            w to h
+                        }
                     }
                 }
 
@@ -997,8 +1019,10 @@ class ScrcpyController(
                             addLog("检测到视频流动态分辨率/屏幕方向变更: ${fixedW}x${fixedH}", LogLevel.INFO)
                             remoteWidth = fixedW
                             remoteHeight = fixedH
-                            nativeWidth = fixedW
-                            nativeHeight = fixedH
+                            if (!isCamera) {
+                                nativeWidth = fixedW
+                                nativeHeight = fixedH
+                            }
                             _screenState.value = ScreenState.Streaming(
                                 width = fixedW,
                                 height = fixedH,
@@ -1017,8 +1041,8 @@ class ScrcpyController(
                             lastFpsTime = now
                         }
 
-                        val curDisplayW = if (remoteWidth > 0) remoteWidth else nativeWidth
-                        val curDisplayH = if (remoteHeight > 0) remoteHeight else nativeHeight
+                        val curDisplayW = if (remoteWidth > 0) remoteWidth else (if (isCamera) actualW else nativeWidth)
+                        val curDisplayH = if (remoteHeight > 0) remoteHeight else (if (isCamera) actualH else nativeHeight)
 
                         _screenState.value = ScreenState.Streaming(
                             width = curDisplayW,

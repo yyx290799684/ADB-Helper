@@ -424,6 +424,12 @@ class H264StreamDecoder(
 
         if (isConfig) {
             latestConfigPacket = packet
+            val parsedSize = tryParseH264Sps(chunk)
+            if (parsedSize != null) {
+                val (spsW, spsH) = parsedSize
+                logger?.invoke("从 SPS 配置帧成功解析原生分辨率: ${spsW}x${spsH}", LogLevel.INFO)
+                onVideoSizeChanged?.invoke(spsW, spsH)
+            }
         }
         if (isKeyFrame) {
             latestKeyFramePacket = packet
@@ -457,6 +463,153 @@ class H264StreamDecoder(
             codec?.release()
         } catch (_: Exception) {}
         codec = null
+    }
+
+    companion object {
+        fun tryParseH264Sps(data: ByteArray): Pair<Int, Int>? {
+            try {
+                var i = 0
+                while (i < data.size - 4) {
+                    var nalStart = -1
+                    if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()) {
+                        nalStart = i + 3
+                    } else if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) {
+                        nalStart = i + 4
+                    }
+                    if (nalStart != -1 && nalStart < data.size) {
+                        val nalType = data[nalStart].toInt() and 0x1F
+                        if (nalType == 7) { // SPS
+                            val rbsp = ByteArray(data.size - nalStart)
+                            var rbspLen = 0
+                            var zeroCount = 0
+                            for (j in nalStart until data.size) {
+                                val b = data[j]
+                                if (zeroCount == 2 && b == 3.toByte()) {
+                                    zeroCount = 0
+                                    continue
+                                }
+                                rbsp[rbspLen++] = b
+                                if (b == 0.toByte()) zeroCount++ else zeroCount = 0
+                            }
+                            val reader = BitReader(rbsp, rbspLen)
+                            reader.readBits(8) // nal header
+                            val profileIdc = reader.readBits(8)
+                            reader.readBits(8) // constraint flags
+                            reader.readBits(8) // level_idc
+                            reader.readExpGolomb() // seq_parameter_set_id
+                            if (profileIdc in listOf(100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134)) {
+                                val chromaFormatIdc = reader.readExpGolomb()
+                                if (chromaFormatIdc == 3) {
+                                    reader.readBits(1)
+                                }
+                                reader.readExpGolomb()
+                                reader.readExpGolomb()
+                                reader.readBits(1)
+                                val seqScalingMatrixPresentFlag = reader.readBits(1)
+                                if (seqScalingMatrixPresentFlag != 0) {
+                                    val limit = if (chromaFormatIdc != 3) 8 else 12
+                                    for (k in 0 until limit) {
+                                        val present = reader.readBits(1)
+                                        if (present != 0) {
+                                            val size = if (k < 6) 16 else 64
+                                            var lastScale = 8
+                                            var nextScale = 8
+                                            for (m in 0 until size) {
+                                                if (nextScale != 0) {
+                                                    val delta = reader.readSignedExpGolomb()
+                                                    nextScale = (lastScale + delta + 256) % 256
+                                                }
+                                                lastScale = if (nextScale == 0) lastScale else nextScale
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            reader.readExpGolomb() // log2_max_frame_num_minus4
+                            val picOrderCntType = reader.readExpGolomb()
+                            if (picOrderCntType == 0) {
+                                reader.readExpGolomb()
+                            } else if (picOrderCntType == 1) {
+                                reader.readBits(1)
+                                reader.readSignedExpGolomb()
+                                reader.readSignedExpGolomb()
+                                val numRef = reader.readExpGolomb()
+                                for (k in 0 until numRef) {
+                                    reader.readSignedExpGolomb()
+                                }
+                            }
+                            reader.readExpGolomb() // max_num_ref_frames
+                            reader.readBits(1)
+                            val picWidthInMbsMinus1 = reader.readExpGolomb()
+                            val picHeightInMapUnitsMinus1 = reader.readExpGolomb()
+                            val frameMbsOnlyFlag = reader.readBits(1)
+                            if (frameMbsOnlyFlag == 0) {
+                                reader.readBits(1)
+                            }
+                            reader.readBits(1)
+                            val frameCroppingFlag = reader.readBits(1)
+                            var cropLeft = 0
+                            var cropRight = 0
+                            var cropTop = 0
+                            var cropBottom = 0
+                            if (frameCroppingFlag != 0) {
+                                cropLeft = reader.readExpGolomb()
+                                cropRight = reader.readExpGolomb()
+                                cropTop = reader.readExpGolomb()
+                                cropBottom = reader.readExpGolomb()
+                            }
+                            val rawWidth = (picWidthInMbsMinus1 + 1) * 16
+                            val rawHeight = (picHeightInMapUnitsMinus1 + 1) * 16 * (2 - frameMbsOnlyFlag)
+                            val cropUnitX = 2
+                            val cropUnitY = 2 * (2 - frameMbsOnlyFlag)
+                            val finalWidth = rawWidth - (cropLeft + cropRight) * cropUnitX
+                            val finalHeight = rawHeight - (cropTop + cropBottom) * cropUnitY
+                            if (finalWidth > 0 && finalHeight > 0) {
+                                return finalWidth to finalHeight
+                            }
+                        }
+                    }
+                    i++
+                }
+            } catch (_: Exception) {}
+            return null
+        }
+    }
+
+    private class BitReader(private val buffer: ByteArray, private val length: Int) {
+        private var byteOffset = 0
+        private var bitOffset = 0
+
+        fun readBits(n: Int): Int {
+            var value = 0
+            for (i in 0 until n) {
+                if (byteOffset >= length) return value
+                val bit = (buffer[byteOffset].toInt() ushr (7 - bitOffset)) and 1
+                value = (value shl 1) or bit
+                bitOffset++
+                if (bitOffset == 8) {
+                    bitOffset = 0
+                    byteOffset++
+                }
+            }
+            return value
+        }
+
+        fun readExpGolomb(): Int {
+            var leadingZeros = 0
+            while (readBits(1) == 0 && leadingZeros < 32 && byteOffset < length) {
+                leadingZeros++
+            }
+            if (leadingZeros == 0) return 0
+            val rest = readBits(leadingZeros)
+            return (1 shl leadingZeros) - 1 + rest
+        }
+
+        fun readSignedExpGolomb(): Int {
+            val code = readExpGolomb()
+            val value = (code + 1) / 2
+            return if (code % 2 == 0) -value else value
+        }
     }
 }
 

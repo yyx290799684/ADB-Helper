@@ -1,6 +1,7 @@
 package com.yangyx.adbhelper.scrcpy
 
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.StayCurrentLandscape
 import androidx.compose.material.icons.filled.StayCurrentPortrait
@@ -1571,6 +1572,41 @@ fun ScrcpyView(
     }
 }
 
+private fun applyVideoTransform(
+    textureView: TextureView,
+    rawWidth: Int = 0,
+    rawHeight: Int = 0,
+    rotation: Int = 0
+) {
+    if (textureView.width == 0 || textureView.height == 0) {
+        textureView.post {
+            applyVideoTransform(textureView, rawWidth, rawHeight, rotation)
+        }
+        return
+    }
+    val viewWidth = textureView.width.toFloat()
+    val viewHeight = textureView.height.toFloat()
+    if (viewWidth <= 0f || viewHeight <= 0f) return
+
+    val cx = viewWidth / 2f
+    val cy = viewHeight / 2f
+    val rot = ((rotation % 360) + 360) % 360
+
+    val matrix = android.graphics.Matrix()
+    if (rot == 90 || rot == 270) {
+        // TextureView maps the unrotated buffer across [0, viewWidth] x [0, viewHeight].
+        // Pre-scale so that rotating 90°/270° maps the buffer to exactly span [0, viewWidth] x [0, viewHeight]
+        // with zero squashing and no double-aspect reduction.
+        val sx = viewHeight / viewWidth
+        val sy = viewWidth / viewHeight
+        matrix.setScale(sx, sy, cx, cy)
+        matrix.postRotate(rot.toFloat(), cx, cy)
+    } else if (rot == 180) {
+        matrix.postRotate(180f, cx, cy)
+    }
+    textureView.setTransform(matrix)
+}
+
 @Composable
 private fun StreamingViewContent(
     state: ScreenState.Streaming,
@@ -1587,7 +1623,6 @@ private fun StreamingViewContent(
     var videoHeight by remember { mutableStateOf(1f) }
     var overlayOffsetX by remember { mutableStateOf(0f) }
     var overlayOffsetY by remember { mutableStateOf(0f) }
-    var cameraRotationDegrees by remember { mutableIntStateOf(0) }
     var showMultiTouchDialog by remember { mutableStateOf(false) }
     var showVolumeDialog by remember { mutableStateOf(false) }
     var showOrientationDialog by remember { mutableStateOf(false) }
@@ -1640,10 +1675,51 @@ private fun StreamingViewContent(
     )
 
     val activity = context as? Activity
-    val isRemoteLandscape = state.width > state.height && state.width > 0 && state.height > 0
+    val configuration = LocalConfiguration.current
+    val isAppPortrait = configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
+    val isCamera = config.videoSource.equals("camera", ignoreCase = true)
+    val isFrontCamera = config.cameraFacing.equals("front", ignoreCase = true)
+
+    // 相机初始画面方向自适应：
+    // 在“画面自适应旋转”或屏幕跟随模式下，根据 APP 当前横竖屏方向自动计算相机的默认校正旋转角度。
+    // Android 设备摄像头 Sensor 硬件固定为横向矩阵输出 (例如 1920x1080)：
+    // 后置摄像头物理偏角通常为 90°，前置摄像头通常为 270°。
+    // 当控制端 APP 处于竖屏 (Portrait) 时，分别旋转 90° (后摄) 或 270° (前摄) 即可让画面呈现为直立的 9:16 竖屏，与 APP 方向一致；
+    // 当控制端 APP 处于横屏 (Landscape) 时，原生 16:9 横向矩阵画面与 APP 横屏一致，旋转 0°。
+    val defaultCameraRotation = remember(isCamera, isAppPortrait, isFrontCamera) {
+        if (isCamera && isAppPortrait) {
+            if (isFrontCamera) 270 else 90
+        } else {
+            0
+        }
+    }
+
+    var cameraRotationDegrees by remember(config.videoSource, config.cameraFacing, config.cameraId) {
+        mutableIntStateOf(defaultCameraRotation)
+    }
+    var hasUserManuallyRotatedCamera by remember(config.videoSource, config.cameraFacing, config.cameraId) {
+        mutableStateOf(false)
+    }
+
+    // 当控制端 APP 物理旋转（竖屏 ⇋ 横屏）且用户未手动强制调节过角度时，自动调整相机画面朝向与 APP 实时对齐
+    LaunchedEffect(isCamera, isAppPortrait, isFrontCamera, config.hostOrientationMode, config.autoRotateHost) {
+        if (isCamera && (config.hostOrientationMode == HostOrientationMode.AUTO || config.autoRotateHost)) {
+            if (!hasUserManuallyRotatedCamera) {
+                cameraRotationDegrees = if (isAppPortrait) {
+                    if (isFrontCamera) 270 else 90
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
+    val isRotated90or270 = isCamera && (cameraRotationDegrees % 180 != 0)
+    // 仅在屏幕投屏 (非相机) 时，根据远端画面真实宽高判定远端是否处于横屏模式
+    val isRemoteLandscape = !isCamera && state.width > state.height && state.width > 0 && state.height > 0
 
     // Adaptive orientation lifecycle: Automatically match host orientation to remote screen
-    LaunchedEffect(isRemoteLandscape, config.autoRotateHost, config.hostOrientationMode, isFullscreen) {
+    LaunchedEffect(isCamera, isRemoteLandscape, config.autoRotateHost, config.hostOrientationMode, isFullscreen) {
         if (activity != null) {
             when (config.hostOrientationMode) {
                 HostOrientationMode.SENSOR -> {
@@ -1656,7 +1732,11 @@ private fun StreamingViewContent(
                     activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                 }
                 HostOrientationMode.AUTO -> {
-                    if (config.autoRotateHost || isFullscreen) {
+                    if (isCamera) {
+                        // 相机镜像模式：Android 手机摄像头硬件 Sensor 原生输出分辨率默认均为横向 (如 1920x1080，width > height)，
+                        // 这并不代表远端设备是横屏。因此在相机模式下，默认不强制控制端旋转为横屏，保持系统默认/自由旋转方向。
+                        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    } else if (config.autoRotateHost || isFullscreen) {
                         if (isRemoteLandscape) {
                             activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                         } else {
@@ -1676,14 +1756,46 @@ private fun StreamingViewContent(
         }
     }
 
-    val isCamera = config.videoSource.equals("camera", ignoreCase = true)
-    val isRotated90or270 = isCamera && (cameraRotationDegrees % 180 != 0)
-    val baseAspect = if (state.width > 0 && state.height > 0) state.width.toFloat() / state.height.toFloat() else 9f / 16f
-    val effectiveAspect = if (isRotated90or270) {
-        if (state.height > 0 && state.width > 0) state.height.toFloat() / state.width.toFloat() else 16f / 9f
+    // 画面比例计算：
+    // 相机模式下，Camera2 传感器硬件原生输出为横向 (Landscape，16:9 宽屏或 4:3 画幅，例如 1920x1080 或 1440x1080)。
+    // 当旋转 90° 或 270°（竖屏使用相机会话）时，屏幕上的有效高宽比应为直立画幅 (9:16 或 3:4)，
+    // 确保画面高度饱满、人物与物体比例真实无压缩；当 APP 横屏时，自动按原生横向画幅呈现。
+    val effectiveAspect = if (isCamera) {
+        val w = if (state.width > 0) state.width else if (controller.remoteWidth > 0) controller.remoteWidth else 0
+        val h = if (state.height > 0) state.height else if (controller.remoteHeight > 0) controller.remoteHeight else 0
+        val sensorAspect = if (w > 0 && h > 0) {
+            val maxDim = maxOf(w, h).toFloat()
+            val minDim = minOf(w, h).toFloat()
+            if (minDim > 0f) maxDim / minDim else (16f / 9f)
+        } else if (config.cameraSize.isNotBlank()) {
+            val parts = config.cameraSize.trim().split("x", "X")
+            val cw = parts.getOrNull(0)?.toFloatOrNull() ?: 1920f
+            val ch = parts.getOrNull(1)?.toFloatOrNull() ?: 1080f
+            val maxDim = maxOf(cw, ch)
+            val minDim = minOf(cw, ch)
+            if (minDim > 0f) maxDim / minDim else (16f / 9f)
+        } else {
+            if (config.cameraAspectRatio.trim().equals("4:3", ignoreCase = true)) (4f / 3f) else (16f / 9f)
+        }
+        if (isRotated90or270) (1f / sensorAspect) else sensorAspect
     } else {
-        baseAspect
+        val w = if (state.width > 0) state.width else if (controller.remoteWidth > 0) controller.remoteWidth else (if (controller.nativeWidth > 0) controller.nativeWidth else 1080)
+        val h = if (state.height > 0) state.height else if (controller.remoteHeight > 0) controller.remoteHeight else (if (controller.nativeHeight > 0) controller.nativeHeight else 1920)
+        if (w > 0 && h > 0) w.toFloat() / h.toFloat() else (9f / 16f)
     }
+
+    val rawW = if (state.width > 0) state.width else {
+        if (config.cameraSize.isNotBlank()) {
+            config.cameraSize.trim().split("x", "X").getOrNull(0)?.toIntOrNull() ?: 1920
+        } else 1920
+    }
+    val rawH = if (state.height > 0) state.height else {
+        if (config.cameraSize.isNotBlank()) {
+            config.cameraSize.trim().split("x", "X").getOrNull(1)?.toIntOrNull() ?: 1080
+        } else 1080
+    }
+    val effectiveRawW = if (isCamera) maxOf(rawW, rawH) else rawW
+    val effectiveRawH = if (isCamera) minOf(rawW, rawH) else rawH
 
     Box(
         modifier = Modifier
@@ -1701,111 +1813,103 @@ private fun StreamingViewContent(
                 maxWidth to (maxWidth.value / effectiveAspect).dp
             }
 
-            val innerW = if (isRotated90or270) targetH else targetW
-            val innerH = if (isRotated90or270) targetW else targetH
-
             Box(
-                modifier = Modifier.size(targetW, targetH),
+                modifier = Modifier
+                    .size(targetW, targetH)
+                    .onGloballyPositioned { coordinates ->
+                        videoWidth = coordinates.size.width.toFloat()
+                        videoHeight = coordinates.size.height.toFloat()
+                    },
                 contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(innerW, innerH)
-                        .graphicsLayer {
-                            rotationZ = if (isCamera) cameraRotationDegrees.toFloat() else 0f
-                        }
-                        .onGloballyPositioned { coordinates ->
-                            videoWidth = coordinates.size.width.toFloat()
-                            videoHeight = coordinates.size.height.toFloat()
-                        }
-                ) {
-                    // 1. TextureView for rendering Scrcpy / Camera video stream
-                    AndroidView(
-                        factory = { ctx ->
-                            var activeSurfaceWrapper: Surface? = null
-                            TextureView(ctx).apply {
-                                isOpaque = true
-                                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                                    override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                                        activeSurfaceWrapper?.release()
-                                        val newSurface = Surface(surfaceTexture)
-                                        activeSurfaceWrapper = newSurface
-                                        controller.setSurface(newSurface)
-                                    }
-
-                                    override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-                                        surfaceTexture.setDefaultBufferSize(width, height)
-                                        // Do not recreate Surface on size change: the existing Surface stays bound to surfaceTexture
-                                    }
-
-                                    override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
-                                        controller.setSurface(null)
-                                        activeSurfaceWrapper = null
-                                        return true
-                                    }
-
-                                    override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {}
-                                }
-                                if (isAvailable && surfaceTexture != null) {
+                // 1. TextureView for rendering Scrcpy / Camera video stream
+                AndroidView(
+                    factory = { ctx ->
+                        var activeSurfaceWrapper: Surface? = null
+                        TextureView(ctx).apply {
+                            isOpaque = true
+                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
                                     activeSurfaceWrapper?.release()
                                     val newSurface = Surface(surfaceTexture)
                                     activeSurfaceWrapper = newSurface
                                     controller.setSurface(newSurface)
+                                    applyVideoTransform(this@apply, effectiveRawW, effectiveRawH, if (isCamera) cameraRotationDegrees else 0)
                                 }
+
+                                override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+                                    applyVideoTransform(this@apply, effectiveRawW, effectiveRawH, if (isCamera) cameraRotationDegrees else 0)
+                                }
+
+                                override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                                    controller.setSurface(null)
+                                    activeSurfaceWrapper = null
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {}
                             }
-                        },
-                        update = { view ->
-                            if (view.isAvailable && view.surfaceTexture != null && controller.activeSurface == null) {
-                                val newSurface = Surface(view.surfaceTexture)
+                            if (isAvailable && surfaceTexture != null) {
+                                activeSurfaceWrapper?.release()
+                                val newSurface = Surface(surfaceTexture)
+                                activeSurfaceWrapper = newSurface
                                 controller.setSurface(newSurface)
+                                applyVideoTransform(this, effectiveRawW, effectiveRawH, if (isCamera) cameraRotationDegrees else 0)
+                            }
+                        }
+                    },
+                    update = { view ->
+                        if (view.isAvailable && view.surfaceTexture != null && controller.activeSurface == null) {
+                            val newSurface = Surface(view.surfaceTexture)
+                            controller.setSurface(newSurface)
+                        }
+                        applyVideoTransform(view, effectiveRawW, effectiveRawH, if (isCamera) cameraRotationDegrees else 0)
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                // 2. High-performance Remote Multi-Touch Capture Layer
+                if (!isCamera) {
+                    AndroidView(
+                        factory = { ctx ->
+                            android.view.View(ctx).apply {
+                                isFocusable = true
+                                isFocusableInTouchMode = true
+                                setOnTouchListener { v, event ->
+                                    val vw = v.width
+                                    val vh = v.height
+                                    val isAv1 = controller.config.value.videoCodec.equals("av1", ignoreCase = true) || controller.config.value.videoCodec.equals("av01", ignoreCase = true)
+                                    val targetW = if (isAv1) {
+                                        controller.remoteWidth.takeIf { it > 0 } ?: (if (controller.nativeWidth > 0) controller.nativeWidth else state.width)
+                                    } else {
+                                        if (controller.nativeWidth > 0) controller.nativeWidth else state.width
+                                    }
+                                    val targetH = if (isAv1) {
+                                        controller.remoteHeight.takeIf { it > 0 } ?: (if (controller.nativeHeight > 0) controller.nativeHeight else state.height)
+                                    } else {
+                                        if (controller.nativeHeight > 0) controller.nativeHeight else state.height
+                                    }
+                                    if (vw > 0 && vh > 0 && targetW > 0 && targetH > 0) {
+                                        controller.multiTouchController.onNativeMotionEvent(
+                                            event = event,
+                                            viewWidth = vw,
+                                            viewHeight = vh,
+                                            remoteWidth = targetW,
+                                            remoteHeight = targetH
+                                        )
+                                    }
+                                    true
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
 
-                    // 2. High-performance Remote Multi-Touch Capture Layer
-                    if (!isCamera) {
-                        AndroidView(
-                            factory = { ctx ->
-                                android.view.View(ctx).apply {
-                                    isFocusable = true
-                                    isFocusableInTouchMode = true
-                                    setOnTouchListener { v, event ->
-                                        val vw = v.width
-                                        val vh = v.height
-                                        val isAv1 = controller.config.value.videoCodec.equals("av1", ignoreCase = true) || controller.config.value.videoCodec.equals("av01", ignoreCase = true)
-                                        val targetW = if (isAv1) {
-                                            controller.remoteWidth.takeIf { it > 0 } ?: (if (controller.nativeWidth > 0) controller.nativeWidth else state.width)
-                                        } else {
-                                            if (controller.nativeWidth > 0) controller.nativeWidth else state.width
-                                        }
-                                        val targetH = if (isAv1) {
-                                            controller.remoteHeight.takeIf { it > 0 } ?: (if (controller.nativeHeight > 0) controller.nativeHeight else state.height)
-                                        } else {
-                                            if (controller.nativeHeight > 0) controller.nativeHeight else state.height
-                                        }
-                                        if (vw > 0 && vh > 0 && targetW > 0 && targetH > 0) {
-                                            controller.multiTouchController.onNativeMotionEvent(
-                                                event = event,
-                                                viewWidth = vw,
-                                                viewHeight = vh,
-                                                remoteWidth = targetW,
-                                                remoteHeight = targetH
-                                            )
-                                        }
-                                        true
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        )
-
-                        // 3. Multi-Touch Visual Overlay (Visual Feedback, Rings, Badges, Distance & Trails)
-                        MultiTouchVisualOverlay(
-                            controller = controller.multiTouchController,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
+                    // 3. Multi-Touch Visual Overlay (Visual Feedback, Rings, Badges, Distance & Trails)
+                    MultiTouchVisualOverlay(
+                        controller = controller.multiTouchController,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
             }
         }
@@ -1817,15 +1921,6 @@ private fun StreamingViewContent(
                 .padding(top = if (isFullscreen) 24.dp else 10.dp)
                 .offset { IntOffset(topBarOffsetX.roundToInt(), topBarOffsetY.roundToInt()) }
                 .graphicsLayer { alpha = topBarAlpha }
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            awaitPointerEvent(PointerEventPass.Initial)
-                            lastTopBarInteractionTime = System.currentTimeMillis()
-                            isTopBarDimmed = false
-                        }
-                    }
-                }
                 .pointerInput(Unit) {
                     detectDragGesturesAfterLongPress { change, dragAmount ->
                         change.consume()
@@ -1977,16 +2072,9 @@ private fun StreamingViewContent(
             visible = isToolbarExpanded,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .graphicsLayer { alpha = toolbarAlpha }
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            awaitPointerEvent(PointerEventPass.Initial)
-                            lastToolbarInteractionTime = System.currentTimeMillis()
-                            isToolbarDimmed = false
-                        }
-                    }
-                },
+                .padding(bottom = if (isFullscreen) 36.dp else 24.dp)
+                .offset { IntOffset(overlayOffsetX.roundToInt(), overlayOffsetY.roundToInt()) }
+                .graphicsLayer { alpha = toolbarAlpha },
             enter = fadeIn(animationSpec = tween(280)) + slideInVertically(initialOffsetY = { it / 2 }, animationSpec = tween(280)) + scaleIn(initialScale = 0.9f, animationSpec = tween(280)),
             exit = fadeOut(animationSpec = tween(200)) + slideOutVertically(targetOffsetY = { it / 2 }, animationSpec = tween(200)) + scaleOut(targetScale = 0.9f, animationSpec = tween(200))
         ) {
@@ -1996,9 +2084,7 @@ private fun StreamingViewContent(
                 tonalElevation = 8.dp,
                 shadowElevation = 12.dp,
                 modifier = Modifier
-                    .padding(bottom = if (isFullscreen) 36.dp else 24.dp)
                     .widthIn(max = (screenWidthDp - 20).dp)
-                    .offset { IntOffset(overlayOffsetX.roundToInt(), overlayOffsetY.roundToInt()) }
             ) {
                 @OptIn(ExperimentalFoundationApi::class)
                 @Composable
@@ -2014,8 +2100,14 @@ private fun StreamingViewContent(
                             .size(42.dp)
                             .clip(CircleShape)
                             .combinedClickable(
-                                onClick = onClick,
+                                onClick = {
+                                    lastToolbarInteractionTime = System.currentTimeMillis()
+                                    isToolbarDimmed = false
+                                    onClick()
+                                },
                                 onLongClick = {
+                                    lastToolbarInteractionTime = System.currentTimeMillis()
+                                    isToolbarDimmed = false
                                     Toast.makeText(context, "功能: $detailName", Toast.LENGTH_SHORT).show()
                                 }
                             ),
@@ -2203,6 +2295,7 @@ private fun StreamingViewContent(
                                 detailName = "摄像头画面逆时针旋转 90°",
                                 tint = MaterialTheme.colorScheme.primary,
                                 onClick = {
+                                    hasUserManuallyRotatedCamera = true
                                     cameraRotationDegrees = (cameraRotationDegrees - 90 + 360) % 360
                                 }
                             )
@@ -2214,6 +2307,7 @@ private fun StreamingViewContent(
                                 detailName = "摄像头画面顺时针旋转 90°",
                                 tint = MaterialTheme.colorScheme.primary,
                                 onClick = {
+                                    hasUserManuallyRotatedCamera = true
                                     cameraRotationDegrees = (cameraRotationDegrees + 90) % 360
                                 }
                             )
@@ -2317,16 +2411,9 @@ private fun StreamingViewContent(
             visible = !isToolbarExpanded,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .graphicsLayer { alpha = toolbarAlpha }
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            awaitPointerEvent(PointerEventPass.Initial)
-                            lastToolbarInteractionTime = System.currentTimeMillis()
-                            isToolbarDimmed = false
-                        }
-                    }
-                },
+                .padding(end = 20.dp, bottom = if (isFullscreen) 36.dp else 24.dp)
+                .offset { IntOffset(miniFabOffsetX.roundToInt(), miniFabOffsetY.roundToInt()) }
+                .graphicsLayer { alpha = toolbarAlpha },
             enter = fadeIn(animationSpec = tween(280)) + scaleIn(initialScale = 0.7f, animationSpec = tween(280)),
             exit = fadeOut(animationSpec = tween(200)) + scaleOut(targetScale = 0.7f, animationSpec = tween(200))
         ) {
@@ -2343,8 +2430,7 @@ private fun StreamingViewContent(
                 tonalElevation = 8.dp,
                 shadowElevation = 10.dp,
                 modifier = Modifier
-                    .padding(end = 20.dp, bottom = if (isFullscreen) 36.dp else 24.dp)
-                    .offset { IntOffset(miniFabOffsetX.roundToInt(), miniFabOffsetY.roundToInt()) }
+                    .size(48.dp)
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
