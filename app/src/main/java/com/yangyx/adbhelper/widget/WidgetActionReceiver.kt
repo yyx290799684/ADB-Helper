@@ -211,6 +211,7 @@ class WidgetActionReceiver : BroadcastReceiver() {
                                 if (isAppConnected && vmSession != null && WidgetStateHolder.activeSession == null) {
                                     WidgetStateHolder.onConnected(vmSession, vmSession.deviceName, "${vmSession.ip}:${vmSession.port}", vm.sessions.value.size)
                                 }
+                                WidgetUpdateHelper.checkAndRefreshMediaStateIfNeeded(context)
                                 WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
                             } else {
                                 // 会话暂不可用，进一步检测目标 IP 与端口是否可达
@@ -365,6 +366,32 @@ class WidgetActionReceiver : BroadcastReceiver() {
                 WidgetActionType.WAKEUP -> {
                     connection.executeShell("input keyevent 224")
                     showToast(context, "已发送唤醒指令")
+                }
+                WidgetActionType.PLAY_PAUSE -> {
+                    // 1. 发送与设备控制页面完全一致的全局媒体播放/暂停按键 (KEYCODE_MEDIA_PLAY_PAUSE = 85)
+                    // 无论当前是播放还是暂停，系统都会无条件执行切换，不会被错误的子指令拦截
+                    connection.executeShell("input keyevent 85")
+
+                    // 2. 状态取反并即时更新桌面小部件（瞬时给用户视觉与触控反馈）
+                    val willBePlaying = !WidgetStateHolder.isMediaPlaying
+                    WidgetStateHolder.updateMediaPlaybackState(willBePlaying)
+                    WidgetUpdateHelper.updateAllWidgets(context)
+
+                    showToast(context, if (willBePlaying) "已发送播放指令" else "已发送暂停指令")
+
+                    // 3. 延时 400ms 与远端对齐真实播放状态 (与 AdbViewModel.mediaPlayPause 保持完全一致的节奏)
+                    receiverScope.launch {
+                        kotlinx.coroutines.delay(400L)
+                        val vm = AdbViewModel.currentInstance
+                        if (vm != null) {
+                            vm.fetchMediaPlaybackInfo()
+                        }
+                        val actual = WidgetUpdateHelper.queryMediaPlayingState(connection)
+                        if (WidgetStateHolder.isMediaPlaying != actual) {
+                            WidgetStateHolder.updateMediaPlaybackState(actual)
+                            WidgetUpdateHelper.updateAllWidgets(context)
+                        }
+                    }
                 }
                 else -> {}
             }

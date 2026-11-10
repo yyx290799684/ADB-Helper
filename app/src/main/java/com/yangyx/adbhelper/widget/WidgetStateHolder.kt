@@ -77,6 +77,17 @@ object WidgetStateHolder {
     var lastConnectedCheckTimestamp: Long = 0L
         private set
 
+    @Volatile
+    var isMediaPlaying: Boolean = false
+
+    @Volatile
+    var lastMediaStateCheckTimestamp: Long = 0L
+
+    fun updateMediaPlaybackState(isPlaying: Boolean) {
+        isMediaPlaying = isPlaying
+        lastMediaStateCheckTimestamp = System.currentTimeMillis()
+    }
+
     val activeConnection: AdbConnection?
         get() = activeSession?.connection ?: com.yangyx.adbhelper.ui.AdbViewModel.currentInstance?.let { vm ->
             vm.currentSession?.connection ?: vm.sessions.value.firstOrNull()?.connection
@@ -102,6 +113,8 @@ object WidgetStateHolder {
         connectedDeviceCount = 0
         activeSession = null
         lastConnectedCheckTimestamp = 0L
+        isMediaPlaying = false
+        lastMediaStateCheckTimestamp = 0L
     }
 
     fun setFallbackDeviceInfo(name: String, ip: String) {

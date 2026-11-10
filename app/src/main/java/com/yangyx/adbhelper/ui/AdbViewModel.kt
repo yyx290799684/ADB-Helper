@@ -412,6 +412,12 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     val currentSession: AdbDeviceSession?
         get() = _sessions.value.firstOrNull { it.id == _currentSessionId.value }
 
+    val currentDeviceId: String
+        get() {
+            val s = currentSession ?: return ""
+            return if (s.serialNo.isNotBlank()) s.serialNo else "${s.ip}:${s.port}"
+        }
+
 
 
     // 虚拟硬件鼠标驱动管理器 (Linux UHID / UINPUT 原生硬件鼠标模拟，唤出原生指针)
@@ -996,6 +1002,9 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _deviceQuickSettings = MutableStateFlow(DeviceQuickSettingsState())
     val deviceQuickSettings: StateFlow<DeviceQuickSettingsState> = _deviceQuickSettings.asStateFlow()
+
+    private val _currentHotspotConfig = MutableStateFlow(com.yangyx.adbhelper.data.DeviceHotspotConfig())
+    val currentHotspotConfig: StateFlow<com.yangyx.adbhelper.data.DeviceHotspotConfig> = _currentHotspotConfig.asStateFlow()
 
     private val _mediaPlaybackInfo = MutableStateFlow(MediaPlaybackInfo())
     val mediaPlaybackInfo: StateFlow<MediaPlaybackInfo> = _mediaPlaybackInfo.asStateFlow()
@@ -2214,7 +2223,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         "echo \"data_glob:\$(settings get global mobile_data 2>/dev/null)\"; " +
                         "echo \"data_sub1:\$(settings get global mobile_data1 2>/dev/null)\"; " +
                         "echo \"data_sub0:\$(settings get global mobile_data0 2>/dev/null)\"; " +
-                        "echo \"data_reg:\$(dumpsys telephony.registry 2>/dev/null | grep -m 1 -i 'mDataConnectionState=' | tr -d '\\r')\""
+                        "echo \"data_reg:\$(dumpsys telephony.registry 2>/dev/null | grep -m 1 -i 'mDataConnectionState=' | tr -d '\\r')\"; " +
+                        "echo \"root:\$(su -c id 2>/dev/null || id 2>/dev/null)\"; " +
+                        "echo \"ap_setting:\$(settings get global wifi_ap_on 2>/dev/null)\"; " +
+                        "echo \"softap_roles:\$(dumpsys wifi 2>/dev/null | grep -m 1 'Current mode roles:' | tr -d '\\r')\"; " +
+                        "echo \"wlan2_exist:\$([ -e /sys/class/net/wlan2 ] && echo 1 || echo 0)\"; " +
+                        "echo \"ap_flags:\$(cat /sys/class/net/wlan2/flags /sys/class/net/ap0/flags /sys/class/net/ap1/flags /sys/class/net/swlan0/flags /sys/class/net/softap0/flags 2>/dev/null | tr '\\n' ' ')\"; " +
+                        "echo \"ap_link:\$(ip link show wlan2 2>/dev/null || ip link show ap0 2>/dev/null || ip link show swlan0 2>/dev/null || ip link show softap0 2>/dev/null | tr '\\n' '@@' | tr -d '\\r')\""
 
                 val output = conn.executeShell(batchCmd)
                 var isBt = _deviceQuickSettings.value.isBluetoothOn
@@ -2228,6 +2243,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 var bright = _deviceQuickSettings.value.brightness
                 var isAutoBright = _deviceQuickSettings.value.isAutoBrightnessOn
                 var isData = _deviceQuickSettings.value.isMobileDataOn
+                var hasRoot = _deviceQuickSettings.value.hasRoot
+                var isHotspot = _deviceQuickSettings.value.isHotspotOn
 
                 var nfcCheck = ""
                 var nfcDump = ""
@@ -2240,6 +2257,11 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 var dataSub1 = ""
                 var dataSub0 = ""
                 var dataReg = ""
+                var apSetting = ""
+                var softapRoles = ""
+                var wlan2Exist = false
+                var apFlags = ""
+                var apLink = ""
 
                 output.lines().forEach { rawLine ->
                     val line = rawLine.trim()
@@ -2309,6 +2331,26 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                         line.startsWith("data_reg:") -> {
                             dataReg = line.removePrefix("data_reg:").trim()
                         }
+                        line.startsWith("root:") -> {
+                            val r = line.removePrefix("root:").trim()
+                            hasRoot = r.contains("uid=0")
+                        }
+                        line.startsWith("ap_setting:") -> {
+                            apSetting = line.removePrefix("ap_setting:").trim()
+                        }
+                        line.startsWith("softap_roles:") -> {
+                            softapRoles = line.removePrefix("softap_roles:").trim()
+                        }
+                        line.startsWith("wlan2_exist:") -> {
+                            wlan2Exist = line.removePrefix("wlan2_exist:").trim() == "1"
+                        }
+                        line.startsWith("ap_flags:") -> {
+                            apFlags = line.removePrefix("ap_flags:").trim()
+                        }
+                        line.startsWith("ap_link:") -> {
+                            val raw = line.removePrefix("ap_link:").trim()
+                            apLink = raw.replace("@@", "\n")
+                        }
                     }
                 }
 
@@ -2349,6 +2391,34 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     isData = false
                 }
 
+                // 便携热点状态精准仲裁:
+                // 1. 动态 AP 网卡 wlan2 (现代高通/小米等机型开热点时内核动态生成 wlan2，关闭时彻底销毁)
+                val isWlan2Active = wlan2Exist
+
+                // 2. sysfs 网卡硬件标志 IFF_UP (bit 0 == 1，如 0x1003 或 0x1043)
+                // 包含真实 AP 网卡 (wlan2, ap0, ap1, swlan0, softap0)，严禁包含 STA 客户端网卡 (wlan0, wlan1)
+                val isApFlagUp = apFlags.split(" ", "\n", "\t").any { token ->
+                    val clean = token.trim().removePrefix("0x")
+                    val v = clean.toIntOrNull(16) ?: 0
+                    (v and 1) == 1
+                }
+
+                // 3. ip link 解析 AP 网卡 (wlan2, ap0, swlan0, softap0) 是否有 UP 标志 (排除 state DOWN)
+                val isApLinkUp = apLink.lines().any { line ->
+                    val inBrackets = line.substringAfter('<', "").substringBefore('>', "")
+                    val flags = inBrackets.split(',').map { it.trim().uppercase() }
+                    flags.contains("UP") || (line.contains("state UP", ignoreCase = true) && !line.contains("state DOWN", ignoreCase = true))
+                }
+
+                // 4. dumpsys wifi 当前活跃模式角色 (ActiveModeWarden 实时模式列表)
+                val isRoleSoftAp = softapRoles.contains("ROLE_SOFTAP", ignoreCase = true)
+
+                // 5. 系统全局设置项 (用户通过原生系统设置开启热点时为 1)
+                val isApSettingOn = apSetting == "1"
+
+                // 综合判定: 任意真实硬件/网络链路或系统活跃信号确认热点开启即为开，全部为假时确定为关
+                isHotspot = isWlan2Active || isApFlagUp || isApLinkUp || isRoleSoftAp || isApSettingOn
+
                 _deviceQuickSettings.value = DeviceQuickSettingsState(
                     isBluetoothOn = isBt,
                     isWifiOn = isWifi,
@@ -2362,8 +2432,14 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     brightness = bright,
                     isAutoBrightnessOn = isAutoBright,
                     isMobileDataOn = isData,
+                    hasRoot = hasRoot,
+                    isHotspotOn = isHotspot,
                     isLoading = false
                 )
+
+                if (hasRoot) {
+                    loadDeviceHotspotConfig(forceFromSystem = false)
+                }
             } catch (_: Exception) {
                 _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isLoading = false)
             }
@@ -2584,6 +2660,96 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * 切换便携热点开关 (需 ROOT 权限，自动使用本设备独立保存的 SSID、密码、频段与频宽)
+     */
+    fun toggleHotspot() {
+        val conn = activeConnection ?: run {
+            _actionMessage.value = "未连接设备"
+            return
+        }
+        val target = !_deviceQuickSettings.value.isHotspotOn
+        _deviceQuickSettings.value = _deviceQuickSettings.value.copy(isHotspotOn = target)
+        val devId = currentDeviceId
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (target) {
+                    val config = com.yangyx.adbhelper.data.DeviceHotspotPreferences.getConfig(getApplication(), devId)
+                        ?: _currentHotspotConfig.value
+                    val cmd = config.buildStartSoftApCommand()
+                    conn.executeShell(cmd)
+                    _actionMessage.value = "已发送开启热点指令: ${config.ssid} (${config.displayBand})"
+                } else {
+                    conn.executeShell("su -c \"cmd wifi stop-softap; settings put global wifi_ap_on 0 2>/dev/null\"")
+                    _actionMessage.value = "已发送关闭热点指令"
+                }
+                delay(1500)
+            } catch (e: Exception) {
+                _actionMessage.value = "热点操作失败: ${e.message}"
+            }
+            fetchQuickSettings()
+        }
+    }
+
+    /**
+     * 更新当前设备的热点参数配置 (仅在本地按设备保存生效，不修改系统文件)
+     */
+    fun updateHotspotConfig(config: com.yangyx.adbhelper.data.DeviceHotspotConfig) {
+        val devId = currentDeviceId
+        if (devId.isNotBlank()) {
+            com.yangyx.adbhelper.data.DeviceHotspotPreferences.saveConfig(getApplication(), devId, config)
+            _currentHotspotConfig.value = config
+            _actionMessage.value = "已保存设备热点配置: ${config.ssid} (${config.displayBand})"
+        }
+    }
+
+    /**
+     * 从系统或本地存储加载当前设备的热点配置
+     */
+    fun loadDeviceHotspotConfig(forceFromSystem: Boolean = false) {
+        val conn = activeConnection ?: return
+        val devId = currentDeviceId
+        if (devId.isBlank()) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = if (!forceFromSystem) {
+                com.yangyx.adbhelper.data.DeviceHotspotPreferences.getConfig(getApplication(), devId)
+            } else null
+
+            if (saved != null) {
+                _currentHotspotConfig.value = saved
+            } else {
+                try {
+                    val xmlOutput = conn.executeShell(
+                        "su -c \"cat /data/misc/apexdata/com.android.wifi/WifiConfigStoreSoftAp.xml 2>/dev/null || cat /data/misc/wifi/WifiConfigStoreSoftAp.xml 2>/dev/null\"",
+                        timeoutMs = 3000
+                    )
+                    if (xmlOutput.contains("WifiSsid") || xmlOutput.contains("<SoftAp>")) {
+                        val parsed = com.yangyx.adbhelper.data.DeviceHotspotPreferences.parseSystemSoftApXml(xmlOutput)
+                        com.yangyx.adbhelper.data.DeviceHotspotPreferences.saveConfig(getApplication(), devId, parsed)
+                        _currentHotspotConfig.value = parsed
+                        if (forceFromSystem) {
+                            _actionMessage.value = "已从系统重新读取热点配置: ${parsed.ssid}"
+                        }
+                    } else {
+                        val fallback = com.yangyx.adbhelper.data.DeviceHotspotConfig()
+                        if (saved == null) {
+                            com.yangyx.adbhelper.data.DeviceHotspotPreferences.saveConfig(getApplication(), devId, fallback)
+                        }
+                        _currentHotspotConfig.value = fallback
+                        if (forceFromSystem) {
+                            _actionMessage.value = "未读取到系统热点文件，已使用默认配置"
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (forceFromSystem) {
+                        _actionMessage.value = "读取系统热点配置失败: ${e.message}"
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * 获取对端设备当前正在播放的媒体信息 (歌曲标题、艺术家、专辑、播放器应用名、播放状态、进度)
      */
     fun fetchMediaPlaybackInfo() {
@@ -2594,6 +2760,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 val output = conn.executeShell("dumpsys media_session 2>/dev/null")
                 val parsed = parseMediaSessionOutput(output)
                 _mediaPlaybackInfo.value = parsed.copy(isLoading = false)
+                if (WidgetStateHolder.isMediaPlaying != parsed.isPlaying) {
+                    WidgetStateHolder.updateMediaPlaybackState(parsed.isPlaying)
+                    WidgetUpdateHelper.updateAllWidgets(getApplication())
+                }
             } catch (_: Exception) {
                 _mediaPlaybackInfo.value = _mediaPlaybackInfo.value.copy(isLoading = false)
             }

@@ -400,6 +400,7 @@ object WidgetUpdateHelper {
 
     fun build2x2Views(context: Context): RemoteViews {
         syncWithActiveAppConnection()
+        checkAndRefreshMediaStateIfNeeded(context)
         val views = RemoteViews(context.packageName, R.layout.widget_quick_2x2)
         val state = WidgetStateHolder.currentState
         var recents = WidgetStateHolder.recentDevices
@@ -518,6 +519,58 @@ object WidgetUpdateHelper {
         }
     }
 
+    fun queryMediaPlayingState(connection: com.yangyx.adbhelper.adb.AdbConnection): Boolean {
+        return try {
+            // 1. 若 App 前台运行且 ViewModel 已解析过媒体信息，直接使用精准缓存
+            com.yangyx.adbhelper.ui.AdbViewModel.currentInstance?.let { vm ->
+                val info = vm.mediaPlaybackInfo.value
+                if (info.hasActiveSession || info.title.isNotBlank()) {
+                    return info.isPlaying
+                }
+            }
+
+            // 2. 否则通过 MediaSessionParser 解析 dumpsys media_session 完整输出 (与设备控制页保持完全一致的解析器)
+            val output = connection.executeShell("dumpsys media_session 2>/dev/null", timeoutMs = 3000)
+            if (output.isNotBlank() && !output.contains("No media sessions", ignoreCase = true)) {
+                val parsed = com.yangyx.adbhelper.ui.models.MediaSessionParser.parseMediaSessionOutput(output)
+                if (parsed.hasActiveSession) {
+                    return parsed.isPlaying
+                }
+            }
+
+            // 3. 兜底检测 dumpsys audio 活跃播放流
+            val audioOutput = connection.executeShell("dumpsys audio 2>/dev/null | grep -iE 'player.*state:started|state:started'", timeoutMs = 1500)
+            audioOutput.contains("started", ignoreCase = true)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun checkAndRefreshMediaStateIfNeeded(context: Context) {
+        if (WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTED) return
+        val actions4x2 = WidgetPreferences.get4x2Actions(context)
+        val actions2x2 = WidgetPreferences.get2x2Actions(context)
+        val hasPlayPause = actions4x2.contains(WidgetActionType.PLAY_PAUSE) || actions2x2.contains(WidgetActionType.PLAY_PAUSE)
+        if (!hasPlayPause) return
+
+        val now = System.currentTimeMillis()
+        if (now - WidgetStateHolder.lastMediaStateCheckTimestamp < 3000L) return
+        WidgetStateHolder.lastMediaStateCheckTimestamp = now
+
+        val conn = WidgetStateHolder.activeConnection ?: return
+        if (!conn.isConnected) return
+
+        helperScope.launch {
+            try {
+                val isPlaying = queryMediaPlayingState(conn)
+                if (WidgetStateHolder.isMediaPlaying != isPlaying) {
+                    WidgetStateHolder.updateMediaPlaybackState(isPlaying)
+                    updateAllWidgets(context)
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun bind2x2ActionSlot(
         context: Context,
         views: RemoteViews,
@@ -527,13 +580,26 @@ object WidgetUpdateHelper {
         action: WidgetActionType,
         requestCode: Int
     ) {
-        views.setImageViewResource(ivId, action.iconResId)
-        views.setTextViewText(tvId, action.title)
+        val isPlayPause = action == WidgetActionType.PLAY_PAUSE
+        val isPlaying = WidgetStateHolder.isMediaPlaying
+        val iconRes = if (isPlayPause) {
+            if (isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play
+        } else {
+            action.iconResId
+        }
+        val title = if (isPlayPause) {
+            if (isPlaying) "暂停" else "播放"
+        } else {
+            action.title
+        }
+        views.setImageViewResource(ivId, iconRes)
+        views.setTextViewText(tvId, title)
         views.setOnClickPendingIntent(btnId, createActionPendingIntent(context, action, requestCode))
     }
 
     fun build4x2Views(context: Context): RemoteViews {
         syncWithActiveAppConnection()
+        checkAndRefreshMediaStateIfNeeded(context)
         if (WidgetStateHolder.checkAndExpireScan()) {
             clearScannedDevicesCache(context)
         }
@@ -660,9 +726,26 @@ object WidgetUpdateHelper {
         action: WidgetActionType,
         requestCode: Int
     ) {
-        views.setImageViewResource(ivId, action.iconResId)
-        views.setTextViewText(titleId, action.title)
-        views.setTextViewText(subTitleId, action.subtitle)
+        val isPlayPause = action == WidgetActionType.PLAY_PAUSE
+        val isPlaying = WidgetStateHolder.isMediaPlaying
+        val iconRes = if (isPlayPause) {
+            if (isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play
+        } else {
+            action.iconResId
+        }
+        val title = if (isPlayPause) {
+            if (isPlaying) "暂停" else "播放"
+        } else {
+            action.title
+        }
+        val subtitle = if (isPlayPause) {
+            if (isPlaying) "暂停播放" else "继续播放"
+        } else {
+            action.subtitle
+        }
+        views.setImageViewResource(ivId, iconRes)
+        views.setTextViewText(titleId, title)
+        views.setTextViewText(subTitleId, subtitle)
         views.setOnClickPendingIntent(btnId, createActionPendingIntent(context, action, requestCode))
     }
 

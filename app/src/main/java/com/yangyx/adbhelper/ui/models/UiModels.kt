@@ -28,6 +28,8 @@ data class DeviceQuickSettingsState(
     val brightness: Int = 128, // 0..255
     val isAutoBrightnessOn: Boolean = false, // 自动亮度
     val isMobileDataOn: Boolean = false,
+    val hasRoot: Boolean = false, // 对端是否具备 ROOT 权限
+    val isHotspotOn: Boolean = false, // 便携热点开启状态
     val isLoading: Boolean = false
 ) {
     val isMuteOn: Boolean

@@ -26,7 +26,8 @@ enum class WidgetActionType(
     VOLUME_DOWN("VOLUME_DOWN", "音量-", "减小音量", R.drawable.ic_widget_volume_down, "降低远端媒体音量"),
     VOLUME_UP("VOLUME_UP", "音量+", "增大音量", R.drawable.ic_widget_volume_up, "提高远端媒体音量"),
     SCREEN_OFF("SCREEN_OFF", "息屏", "关闭屏幕", R.drawable.ic_widget_power, "熄灭远端屏幕"),
-    WAKEUP("WAKEUP", "唤醒", "点亮屏幕", R.drawable.ic_widget_bolt, "点亮唤醒远端屏幕");
+    WAKEUP("WAKEUP", "唤醒", "点亮屏幕", R.drawable.ic_widget_bolt, "点亮唤醒远端屏幕"),
+    PLAY_PAUSE("PLAY_PAUSE", "播放/暂停", "媒体播放", R.drawable.ic_widget_play, "智能切换媒体播放与暂停");
 
     companion object {
         fun fromId(id: String?, default: WidgetActionType = LOCK): WidgetActionType {

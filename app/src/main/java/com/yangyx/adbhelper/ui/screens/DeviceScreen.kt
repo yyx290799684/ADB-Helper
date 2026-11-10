@@ -60,6 +60,8 @@ import androidx.compose.material.icons.filled.SignalCellularConnectedNoInternet0
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material.icons.filled.WifiTethering
+import com.yangyx.adbhelper.ui.components.DeviceHotspotConfigDialog
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DeveloperBoard
@@ -782,6 +784,48 @@ private fun DeviceControlTab(
                             onClick = { viewModel.toggleMobileData() },
                             modifier = Modifier.weight(1f)
                         )
+                    }
+
+                    // Row 5: ROOT 特权功能 - 便携热点开关 & 热点参数配置 (无 ROOT 时不显示)
+                    if (quickSettings.hasRoot) {
+                        val hotspotConfig by viewModel.currentHotspotConfig.collectAsState()
+                        var showHotspotConfigDialog by remember { mutableStateOf(false) }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            QuickTile(
+                                title = "便携热点",
+                                subtitle = if (quickSettings.isHotspotOn) "已开启 • ${hotspotConfig.ssid}" else "已关闭 • 点击开启",
+                                icon = Icons.Default.WifiTethering,
+                                isActive = quickSettings.isHotspotOn,
+                                onClick = { viewModel.toggleHotspot() },
+                                modifier = Modifier.weight(1f)
+                            )
+                            QuickTile(
+                                title = "热点参数设置",
+                                subtitle = "${hotspotConfig.displayBand} • ${hotspotConfig.displayBandwidth}",
+                                icon = Icons.Default.Tune,
+                                isActive = false,
+                                onClick = { showHotspotConfigDialog = true },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        if (showHotspotConfigDialog) {
+                            DeviceHotspotConfigDialog(
+                                config = hotspotConfig,
+                                onDismissRequest = { showHotspotConfigDialog = false },
+                                onSave = { newCfg ->
+                                    viewModel.updateHotspotConfig(newCfg)
+                                    showHotspotConfigDialog = false
+                                },
+                                onReReadFromSystem = {
+                                    viewModel.loadDeviceHotspotConfig(forceFromSystem = true)
+                                }
+                            )
+                        }
                     }
                 }
             }
