@@ -12,8 +12,10 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.yangyx.adbhelper.MainActivity
 import com.yangyx.adbhelper.R
+import com.yangyx.adbhelper.ui.AdbViewModel
 
 class AdbSessionService : Service() {
 
@@ -25,8 +27,16 @@ class AdbSessionService : Service() {
         const val EXTRA_DEVICE_NAME = "extra_device_name"
         const val EXTRA_DEVICE_IP = "extra_device_ip"
 
+        @Volatile
+        var activeInstance: AdbSessionService? = null
+            private set
+
+        @Volatile
+        private var explicitlyStopping: Boolean = false
+
         fun startService(context: Context, deviceName: String, deviceIp: String) {
             try {
+                explicitlyStopping = false
                 val intent = Intent(context, AdbSessionService::class.java).apply {
                     action = ACTION_START
                     putExtra(EXTRA_DEVICE_NAME, deviceName)
@@ -48,6 +58,7 @@ class AdbSessionService : Service() {
 
         fun stopService(context: Context) {
             try {
+                explicitlyStopping = true
                 val intent = Intent(context, AdbSessionService::class.java).apply {
                     action = ACTION_STOP
                 }
@@ -60,15 +71,21 @@ class AdbSessionService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var lastDeviceName: String = "ADB 远程设备"
+    private var lastDeviceIp: String = ""
+    @Volatile
+    private var isShowingMirrorLiveAsForeground: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         createNotificationChannel()
         acquireLocks()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent == null || intent.action == ACTION_STOP) {
+            explicitlyStopping = true
             try {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -76,30 +93,92 @@ class AdbSessionService : Service() {
             return START_NOT_STICKY
         }
 
-        val deviceName = intent?.getStringExtra(EXTRA_DEVICE_NAME) ?: "ADB 远程设备"
-        val deviceIp = intent?.getStringExtra(EXTRA_DEVICE_IP) ?: ""
+        explicitlyStopping = false
+        lastDeviceName = intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "ADB 远程设备"
+        lastDeviceIp = intent.getStringExtra(EXTRA_DEVICE_IP) ?: ""
 
-        val notification = buildNotification(deviceName, deviceIp)
+        if (!isShowingMirrorLiveAsForeground) {
+            startForegroundCompat(NOTIFICATION_ID, buildNotification(lastDeviceName, lastDeviceIp))
+        }
+
+        return START_NOT_STICKY
+    }
+
+    fun showMirrorLiveForeground(notification: Notification) {
+        try {
+            if (!isShowingMirrorLiveAsForeground) {
+                isShowingMirrorLiveAsForeground = true
+                startForegroundCompat(MirrorLiveNotificationManager.NOTIFICATION_ID, notification)
+                try {
+                    NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID)
+                } catch (_: Exception) {}
+            } else {
+                try {
+                    NotificationManagerCompat.from(this).notify(
+                        MirrorLiveNotificationManager.NOTIFICATION_ID,
+                        notification
+                    )
+                } catch (_: SecurityException) {
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun restoreAdbSessionForeground() {
+        if (!isShowingMirrorLiveAsForeground) {
+            try {
+                NotificationManagerCompat.from(this).cancel(MirrorLiveNotificationManager.NOTIFICATION_ID)
+            } catch (_: Exception) {}
+            return
+        }
+        isShowingMirrorLiveAsForeground = false
+        startForegroundCompat(NOTIFICATION_ID, buildNotification(lastDeviceName, lastDeviceIp))
+        try {
+            NotificationManagerCompat.from(this).cancel(MirrorLiveNotificationManager.NOTIFICATION_ID)
+        } catch (_: Exception) {}
+    }
+
+    private fun startForegroundCompat(id: Int, notification: Notification) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
-                    NOTIFICATION_ID,
+                    id,
                     notification,
                     android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 )
             } else {
-                startForeground(NOTIFICATION_ID, notification)
+                startForeground(id, notification)
             }
         } catch (e: Exception) {
             e.printStackTrace()
             try {
-                startForeground(NOTIFICATION_ID, notification)
+                startForeground(id, notification)
             } catch (e2: Exception) {
                 e2.printStackTrace()
             }
         }
+    }
 
-        return START_STICKY
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        explicitlyStopping = true
+        try {
+            AdbViewModel.currentInstance?.onAppTaskRemoved(fromServiceDestroy = true)
+        } catch (_: Exception) {}
+        cancelAllServiceNotifications()
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        } catch (_: Exception) {}
+    }
+
+    private fun cancelAllServiceNotifications() {
+        try {
+            NotificationManagerCompat.from(applicationContext).cancel(MirrorLiveNotificationManager.NOTIFICATION_ID)
+        } catch (_: Exception) {}
+        try {
+            NotificationManagerCompat.from(applicationContext).cancel(NOTIFICATION_ID)
+        } catch (_: Exception) {}
     }
 
     private fun acquireLocks() {
@@ -171,7 +250,7 @@ class AdbSessionService : Service() {
         val content = if (deviceIp.isNotBlank()) "正在与 $deviceName ($deviceIp) 保持后台 ADB 会话" else "正在与 $deviceName 保持后台 ADB 会话"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_mirror_live)
             .setContentTitle("ADB 调试助手运行中")
             .setContentText(content)
             .setContentIntent(pendingIntent)
@@ -182,6 +261,18 @@ class AdbSessionService : Service() {
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
+        isShowingMirrorLiveAsForeground = false
+        val stoppedBySystem = !explicitlyStopping
+        explicitlyStopping = false
+        if (stoppedBySystem) {
+            try {
+                AdbViewModel.currentInstance?.onAppTaskRemoved(fromServiceDestroy = true)
+            } catch (_: Exception) {}
+        }
+        cancelAllServiceNotifications()
         super.onDestroy()
         releaseLocks()
     }

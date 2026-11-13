@@ -100,10 +100,16 @@ import androidx.compose.ui.window.DialogProperties
 import com.yangyx.adbhelper.ui.AdbViewModel
 import android.util.LruCache
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.ContentScale
+import com.yangyx.adbhelper.data.AppIconCacheManager
 import com.yangyx.adbhelper.ui.models.LocalAppItem
 import com.yangyx.adbhelper.ui.models.RemoteAppItem
 import com.yangyx.adbhelper.ui.models.RemoteProcessItem
@@ -112,6 +118,7 @@ private val localAppIconCache = LruCache<String, androidx.compose.ui.graphics.Im
 
 private sealed class ConfirmAction {
     data class ForceStop(val app: RemoteAppItem) : ConfirmAction()
+    data class DisableApp(val app: RemoteAppItem) : ConfirmAction()
     data class ClearData(val app: RemoteAppItem) : ConfirmAction()
     data class Uninstall(val app: RemoteAppItem) : ConfirmAction()
     data class KillProcess(val proc: RemoteProcessItem) : ConfirmAction()
@@ -139,7 +146,11 @@ fun AppAndProcessScreen(
 
     val searchQuery by viewModel.appSearchQuery.collectAsState()
     val showSystemApps by viewModel.appShowSystemApps.collectAsState()
+    val showDisabledOnly by viewModel.appShowDisabledOnly.collectAsState()
     val processFilterMode by viewModel.processFilterMode.collectAsState()
+    val iconCacheSizeBytes by AppIconCacheManager.cacheSizeBytes.collectAsState()
+    val currentSessionId by viewModel.currentSessionId.collectAsState()
+    val deviceKey = remember(currentSessionId) { viewModel.currentDeviceId.ifBlank { "default" } }
     var pendingConfirmAction by remember { mutableStateOf<ConfirmAction?>(null) }
     var pendingRootTripleConfirmProc by remember { mutableStateOf<RemoteProcessItem?>(null) }
     var showDiagnosisDialog by remember { mutableStateOf(false) }
@@ -163,6 +174,7 @@ fun AppAndProcessScreen(
 
     // Deduplicated initial loading
     LaunchedEffect(Unit) {
+        AppIconCacheManager.refreshCacheSize(context)
         if (apps.isEmpty() && !isAppLoading) {
             viewModel.refreshApps(force = false)
         }
@@ -231,16 +243,22 @@ fun AppAndProcessScreen(
 
             if (selectedTabIndex == 0) {
                 // Apps Tab
-                val filteredApps by remember(apps, searchQuery, showSystemApps) {
+                val filteredApps by remember(apps, searchQuery, showSystemApps, showDisabledOnly) {
                     derivedStateOf {
                         apps.filter { app ->
                             (showSystemApps || !app.isSystemApp) &&
+                                    (!showDisabledOnly || app.isDisabled) &&
                                     (searchQuery.isBlank() ||
                                             app.packageName.contains(searchQuery, ignoreCase = true) ||
                                             app.appName.contains(searchQuery, ignoreCase = true) ||
                                             app.versionName.contains(searchQuery, ignoreCase = true) ||
                                             (app.versionCode > 0 && app.versionCode.toString().contains(searchQuery)))
                         }
+                    }
+                }
+                val disabledInScopeCount by remember(apps, showSystemApps) {
+                    derivedStateOf {
+                        apps.count { (showSystemApps || !it.isSystemApp) && it.isDisabled }
                     }
                 }
 
@@ -284,22 +302,56 @@ fun AppAndProcessScreen(
                     }
                 }
 
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "共 ${filteredApps.size} 个应用",
+                            text = if (disabledInScopeCount > 0) {
+                                "共 ${filteredApps.size} 个应用 · 已停用 $disabledInScopeCount"
+                            } else {
+                                "共 ${filteredApps.size} 个应用"
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        FilledTonalButton(
+                            onClick = {
+                                showLocalAppAnalysisScreen = true
+                                viewModel.runLocalAppAnalysis(context, force = false)
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Analytics,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "远端应用分析",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         FilterChip(
                             selected = showSystemApps,
                             onClick = { viewModel.setAppShowSystemApps(!showSystemApps) },
@@ -308,26 +360,36 @@ fun AppAndProcessScreen(
                                 { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
                             } else null
                         )
-                    }
-
-                    FilledTonalButton(
-                        onClick = {
-                            showLocalAppAnalysisScreen = true
-                            viewModel.runLocalAppAnalysis(context, force = false)
-                        },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Analytics,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
+                        FilterChip(
+                            selected = showDisabledOnly,
+                            onClick = { viewModel.setAppShowDisabledOnly(!showDisabledOnly) },
+                            label = {
+                                Text(
+                                    if (disabledInScopeCount > 0) "仅看已停用 ($disabledInScopeCount)" else "仅看已停用"
+                                )
+                            },
+                            leadingIcon = if (showDisabledOnly) {
+                                { Icon(Icons.Default.Block, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                            } else null
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "远端应用分析",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
+                        AssistChip(
+                            onClick = { viewModel.clearAppIconCache(context) },
+                            label = {
+                                val sizeStr = when {
+                                    iconCacheSizeBytes >= 1024 * 1024 -> String.format("清除图标缓存 (%.1fMB)", iconCacheSizeBytes / (1024.0 * 1024.0))
+                                    iconCacheSizeBytes >= 1024 -> "清除图标缓存 (${iconCacheSizeBytes / 1024}KB)"
+                                    iconCacheSizeBytes > 0 -> "清除图标缓存 (1KB)"
+                                    else -> "清除图标缓存"
+                                }
+                                Text(sizeStr)
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.DeleteSweep,
+                                    contentDescription = "清除图标缓存",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         )
                     }
                 }
@@ -346,6 +408,10 @@ fun AppAndProcessScreen(
                     ) { app ->
                         AppItemCard(
                             app = app,
+                            deviceKey = deviceKey,
+                            onLoadIcon = { targetApp ->
+                                viewModel.loadRemoteAppIcon(context, deviceKey, targetApp)
+                            },
                             onExport = {
                                 appToExport = app
                                 val safeName = "${app.appName.ifBlank { app.packageName }}_${app.packageName}.apk"
@@ -353,6 +419,13 @@ fun AppAndProcessScreen(
                                 exportApkLauncher.launch(safeName)
                             },
                             onLaunch = { viewModel.launchApp(app.packageName) },
+                            onToggleEnabled = {
+                                if (app.isDisabled) {
+                                    viewModel.setAppEnabled(app.packageName, true)
+                                } else {
+                                    pendingConfirmAction = ConfirmAction.DisableApp(app)
+                                }
+                            },
                             onForceStop = { pendingConfirmAction = ConfirmAction.ForceStop(app) },
                             onUninstall = { pendingConfirmAction = ConfirmAction.Uninstall(app) },
                             onClearData = { pendingConfirmAction = ConfirmAction.ClearData(app) }
@@ -700,6 +773,17 @@ fun AppAndProcessScreen(
                     text = "确定要强制停止应用「${action.app.appName}」(${action.app.packageName}) 吗？"
                     confirmLabel = "强行停止"
                     onConfirm = { viewModel.forceStopApp(action.app.packageName) }
+                }
+                is ConfirmAction.DisableApp -> {
+                    title = "确认停用应用"
+                    text = buildString {
+                        append("确定要停用应用「${action.app.appName}」(${action.app.packageName}) 吗？\n\n停用后该应用将冻结并从桌面隐藏，无法在后台自启；您随时可以在应用列表中点击“启用应用”恢复。")
+                        if (action.app.isSystemApp) {
+                            append("\n\n⚠️ 注意：该应用为系统应用，停用核心系统组件可能导致部分系统功能异常。")
+                        }
+                    }
+                    confirmLabel = "确认停用"
+                    onConfirm = { viewModel.setAppEnabled(action.app.packageName, false) }
                 }
                 is ConfirmAction.ClearData -> {
                     title = "确认清除应用数据"
@@ -1263,19 +1347,39 @@ fun LocalAppItemCard(
 @Composable
 fun AppItemCard(
     app: RemoteAppItem,
+    deviceKey: String,
+    onLoadIcon: suspend (RemoteAppItem) -> androidx.compose.ui.graphics.ImageBitmap?,
     onExport: () -> Unit,
     onLaunch: () -> Unit,
+    onToggleEnabled: () -> Unit,
     onForceStop: () -> Unit,
     onUninstall: () -> Unit,
     onClearData: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val iconCacheVersion by AppIconCacheManager.cacheVersion.collectAsState()
+    var remoteAppIcon by remember(deviceKey, app.packageName, iconCacheVersion) {
+        mutableStateOf(AppIconCacheManager.getCachedMemory(deviceKey, app.packageName))
+    }
+
+    LaunchedEffect(deviceKey, app.packageName, app.hasIcon, iconCacheVersion) {
+        if (remoteAppIcon == null) {
+            remoteAppIcon = onLoadIcon(app)
+        }
+    }
 
     Card(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
+            containerColor = if (app.isDisabled) {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            } else {
+                MaterialTheme.colorScheme.surface
+            }
         ),
+        border = if (app.isDisabled) {
+            BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.25f))
+        } else null,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -1284,34 +1388,87 @@ fun AppItemCard(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(
-                color = if (app.isSystemApp) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
-                shape = CircleShape,
-                modifier = Modifier.size(42.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = if (app.isSystemApp) Icons.Default.PhoneAndroid else Icons.Default.Android,
-                        contentDescription = "App",
-                        tint = if (app.isSystemApp) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(24.dp)
-                    )
+            val loadedIcon = remoteAppIcon
+            if (loadedIcon != null) {
+                Image(
+                    bitmap = loadedIcon,
+                    contentDescription = app.appName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .alpha(if (app.isDisabled) 0.55f else 1f)
+                )
+            } else {
+                Surface(
+                    color = when {
+                        app.isDisabled -> MaterialTheme.colorScheme.surfaceVariant
+                        app.isSystemApp -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
+                        else -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                    },
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .size(42.dp)
+                        .alpha(if (app.isDisabled) 0.65f else 1f)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = if (app.isSystemApp) Icons.Default.PhoneAndroid else Icons.Default.Android,
+                            contentDescription = "App",
+                            tint = when {
+                                app.isDisabled -> MaterialTheme.colorScheme.onSurfaceVariant
+                                app.isSystemApp -> MaterialTheme.colorScheme.tertiary
+                                else -> MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     Text(
                         text = app.appName,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
+                        color = if (app.isDisabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
+                    if (app.isDisabled) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = MaterialTheme.colorScheme.errorContainer
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Block,
+                                    contentDescription = "已停用",
+                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    text = "已停用",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
                     if (app.isSystemApp) {
-                        Spacer(modifier = Modifier.width(6.dp))
                         Surface(
                             shape = RoundedCornerShape(4.dp),
                             color = MaterialTheme.colorScheme.tertiaryContainer
@@ -1321,7 +1478,8 @@ fun AppItemCard(
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onTertiaryContainer,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                maxLines = 1
                             )
                         }
                     }
@@ -1331,7 +1489,8 @@ fun AppItemCard(
                     text = app.packageName,
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 if (app.versionName.isNotBlank() || app.versionCode > 0L) {
                     Spacer(modifier = Modifier.height(4.dp))
@@ -1402,19 +1561,42 @@ fun AppItemCard(
                             onExport()
                         }
                     )
+                    if (!app.isDisabled) {
+                        DropdownMenuItem(
+                            text = { Text("启动应用") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onLaunch()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
-                        text = { Text("启动应用") },
+                        text = {
+                            Text(
+                                text = if (app.isDisabled) "启用应用" else "停用应用",
+                                color = if (app.isDisabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.Medium
+                            )
+                        },
                         leadingIcon = {
                             Icon(
-                                Icons.Default.PlayArrow,
+                                imageVector = if (app.isDisabled) Icons.Default.CheckCircle else Icons.Default.Block,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
+                                tint = if (app.isDisabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                                 modifier = Modifier.size(18.dp)
                             )
                         },
                         onClick = {
                             showMenu = false
-                            onLaunch()
+                            onToggleEnabled()
                         }
                     )
                     DropdownMenuItem(

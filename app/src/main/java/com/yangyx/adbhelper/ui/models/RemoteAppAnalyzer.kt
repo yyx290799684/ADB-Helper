@@ -367,8 +367,7 @@ object RemoteAppAnalyzer {
             }
         }
 
-        // Step 4: Resolve app display names by reusing the App List's cached aapt2 labels & remote aapt2
-        onProgress(0.70f, "4/5 正在复用应用列表与 aapt2 解析应用真实名称...")
+        onProgress(0.70f, "4/5 正在采集应用名称与远端图标...")
 
         val resolvedLabels = mutableMapOf<String, String>()
         // Seed from global persistent label cache
@@ -380,6 +379,22 @@ object RemoteAppAnalyzer {
             if (item.appName.isNotBlank() && item.appName != item.packageName) {
                 resolvedLabels[item.packageName] = item.appName
                 RemoteAppLabelManager.labelCache[item.packageName] = item.appName
+            }
+        }
+
+        // Ensure remote AppInfoServer has extracted icons (and localized labels) even if App List wasn't opened first
+        if (context != null) {
+            val serverItems = com.yangyx.adbhelper.data.RemoteAppServerManager.collectRemoteApps(
+                context = context,
+                conn = conn,
+                forceRefresh = false,
+                parseFallbackName = { parseFriendlyAppName(it) }
+            )
+            serverItems?.forEach { item ->
+                if (item.appName.isNotBlank() && item.appName != item.packageName) {
+                    resolvedLabels[item.packageName] = item.appName
+                    RemoteAppLabelManager.labelCache[item.packageName] = item.appName
+                }
             }
         }
 

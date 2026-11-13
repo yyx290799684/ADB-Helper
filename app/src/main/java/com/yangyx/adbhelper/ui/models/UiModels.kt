@@ -131,10 +131,13 @@ data class RemoteAppItem(
     val packageName: String,
     val appName: String,
     val isSystemApp: Boolean = false,
+    val isDisabled: Boolean = false,
     val apkPath: String = "",
     val splitApkPaths: List<String> = emptyList(),
     val versionName: String = "",
-    val versionCode: Long = 0L
+    val versionCode: Long = 0L,
+    val hasIcon: Boolean = true,
+    val iconRemotePath: String = ""
 )
 
 @Immutable

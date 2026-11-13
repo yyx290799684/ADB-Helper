@@ -182,6 +182,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         currentInstance = this
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(application)
         viewModelScope.launch(Dispatchers.IO) {
             repository.checkAndRestoreBackupIfNeeded()
         }
@@ -618,6 +619,306 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private var bgMirroringWatchJob: Job? = null
+    private var liveMirrorNotificationJob: Job? = null
+    private val mirrorSessionStartTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    @Volatile private var isAppInForeground: Boolean = true
+    @Volatile private var isAppTaskRemoved: Boolean = false
+    @Volatile private var isTaskTerminationDispatched: Boolean = false
+    @Volatile private var userDismissedLiveMirrorNotification: Boolean = false
+
+    fun ensureSessionServiceRunning() {
+        val state = _connectionState.value
+        if (state is ConnectionState.Connected) {
+            com.yangyx.adbhelper.service.AdbSessionService.startService(
+                getApplication(),
+                state.deviceName,
+                state.ip
+            )
+        }
+    }
+
+    fun onAppForegroundStateChanged(inForeground: Boolean) {
+        isAppInForeground = inForeground
+        if (inForeground) {
+            isAppTaskRemoved = false
+            isTaskTerminationDispatched = false
+            userDismissedLiveMirrorNotification = false
+            liveMirrorNotificationJob?.cancel()
+            liveMirrorNotificationJob = null
+            com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(
+                getApplication(),
+                restoreSessionForeground = true
+            )
+        } else {
+            if (isAppTaskRemoved) return
+            liveMirrorNotificationJob?.cancel()
+            liveMirrorNotificationJob = viewModelScope.launch(Dispatchers.IO) {
+                // 等待短时间确认非从最近任务划掉杀进程后再发布实时通知
+                delay(400)
+                if (isAppInForeground || isAppTaskRemoved || userDismissedLiveMirrorNotification) {
+                    return@launch
+                }
+                val initialActive = syncLiveMirrorNotificationOnce()
+                if (!initialActive) return@launch
+                while (isActive && !isAppInForeground && !isAppTaskRemoved) {
+                    delay(2500)
+                    if (!isAppInForeground && !isAppTaskRemoved) {
+                        val stillActive = syncLiveMirrorNotificationOnce()
+                        if (!stillActive) break
+                    }
+                }
+            }
+        }
+    }
+
+    fun onAppTaskRemoved(fromServiceDestroy: Boolean = false) {
+        isAppTaskRemoved = true
+        isAppInForeground = false
+        userDismissedLiveMirrorNotification = true
+        liveMirrorNotificationJob?.cancel()
+        liveMirrorNotificationJob = null
+        mirrorSessionStartTimes.clear()
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(getApplication())
+        if (isTaskTerminationDispatched) return
+        isTaskTerminationDispatched = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                disconnectAll(stopSessionService = !fromServiceDestroy)
+            } catch (_: Exception) {
+                try {
+                    scrcpyController?.stopMirroring()
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    fun onAppActivityFinishing() {
+        isAppTaskRemoved = true
+        userDismissedLiveMirrorNotification = true
+        liveMirrorNotificationJob?.cancel()
+        liveMirrorNotificationJob = null
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(getApplication())
+    }
+
+    fun onLiveMirrorNotificationDismissed() {
+        userDismissedLiveMirrorNotification = true
+        liveMirrorNotificationJob?.cancel()
+        liveMirrorNotificationJob = null
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(
+            getApplication(),
+            restoreSessionForeground = (_connectionState.value is ConnectionState.Connected)
+        )
+    }
+
+    fun stopMirroringFromNotification(sessionId: String) {
+        val target = _sessions.value.firstOrNull { it.id == sessionId }
+            ?: currentSession
+        if (target != null) {
+            target.autoResumeMirroringOnSwitch = false
+            target.backgroundTimestamp = 0L
+            mirrorSessionStartTimes.remove(target.id)
+            target.scrcpyController.stopMirroring()
+            _actionMessage.value = "已停止【${target.deviceName}】投屏"
+        } else {
+            mirrorSessionStartTimes.remove("fallback")
+            scrcpyController?.stopMirroring()
+            _actionMessage.value = "已停止投屏"
+        }
+        liveMirrorNotificationJob?.cancel()
+        liveMirrorNotificationJob = null
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(
+            getApplication(),
+            restoreSessionForeground = (_connectionState.value is ConnectionState.Connected)
+        )
+    }
+
+    fun restoreMirrorSessionFromNotification(sessionId: String) {
+        userDismissedLiveMirrorNotification = false
+        liveMirrorNotificationJob?.cancel()
+        liveMirrorNotificationJob = null
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(
+            getApplication(),
+            restoreSessionForeground = true
+        )
+
+        val target = if (sessionId.isNotBlank()) {
+            _sessions.value.firstOrNull { it.id == sessionId }
+        } else {
+            null
+        } ?: findActiveMirrorSession()
+
+        if (target != null) {
+            target.selectedNavIndex = 0
+            target.backgroundTimestamp = 0L
+            if (target.id != _currentSessionId.value) {
+                switchSession(target.id, saveCurrentIndex = null)
+            }
+            val state = target.scrcpyController.screenState.value
+            if (state !is ScreenState.Streaming && state !is ScreenState.Connecting) {
+                if (target.autoResumeMirroringOnSwitch || target.connection.isConnected) {
+                    target.autoResumeMirroringOnSwitch = false
+                    target.scrcpyController.startMirroring()
+                    _actionMessage.value = "已恢复投屏会话: ${target.deviceName}"
+                }
+            } else {
+                target.autoResumeMirroringOnSwitch = false
+                target.scrcpyController.triggerRemoteScreenRefresh()
+            }
+        } else {
+            val ctrl = scrcpyController
+            if (ctrl != null) {
+                val state = ctrl.screenState.value
+                if (state is ScreenState.Streaming) {
+                    ctrl.triggerRemoteScreenRefresh()
+                } else if (state !is ScreenState.Connecting && activeConnection?.isConnected == true) {
+                    ctrl.startMirroring()
+                }
+            }
+        }
+    }
+
+    private fun findActiveMirrorSession(): AdbDeviceSession? {
+        val current = currentSession
+        if (current != null) {
+            val s = current.scrcpyController.screenState.value
+            if (s is ScreenState.Streaming || s is ScreenState.Connecting || current.autoResumeMirroringOnSwitch) {
+                return current
+            }
+        }
+        return _sessions.value.firstOrNull { session ->
+            val s = session.scrcpyController.screenState.value
+            s is ScreenState.Streaming || s is ScreenState.Connecting || session.autoResumeMirroringOnSwitch
+        }
+    }
+
+    private fun syncLiveMirrorNotificationOnce(): Boolean {
+        if (isAppInForeground || userDismissedLiveMirrorNotification) return false
+
+        val session = findActiveMirrorSession()
+        if (session != null) {
+            val info = buildNotificationInfo(
+                key = session.id,
+                sessionId = session.id,
+                deviceName = session.displayName.ifBlank { session.deviceName },
+                endpoint = if (session.isUsb) "USB OTG" else "${session.ip}:${session.port}",
+                controller = session.scrcpyController,
+                isPausedResumable = session.autoResumeMirroringOnSwitch &&
+                    session.scrcpyController.screenState.value !is ScreenState.Streaming &&
+                    session.scrcpyController.screenState.value !is ScreenState.Connecting
+            )
+            if (info != null) {
+                com.yangyx.adbhelper.service.MirrorLiveNotificationManager.showOrUpdate(getApplication(), info)
+                return true
+            }
+        } else {
+            val ctrl = scrcpyController
+            val connState = _connectionState.value
+            if (ctrl != null && connState is ConnectionState.Connected) {
+                val info = buildNotificationInfo(
+                    key = "fallback",
+                    sessionId = "",
+                    deviceName = connState.deviceName,
+                    endpoint = connState.ip,
+                    controller = ctrl,
+                    isPausedResumable = false
+                )
+                if (info != null) {
+                    com.yangyx.adbhelper.service.MirrorLiveNotificationManager.showOrUpdate(getApplication(), info)
+                    return true
+                }
+            }
+        }
+
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(
+            getApplication(),
+            restoreSessionForeground = (_connectionState.value is ConnectionState.Connected)
+        )
+        return false
+    }
+
+    private fun buildNotificationInfo(
+        key: String,
+        sessionId: String,
+        deviceName: String,
+        endpoint: String,
+        controller: ScrcpyController,
+        isPausedResumable: Boolean
+    ): com.yangyx.adbhelper.service.MirrorLiveNotificationInfo? {
+        val state = controller.screenState.value
+        val cfg = controller.config.value
+        val isVirtual = controller.isVirtualDisplayActive.value
+        val isCamera = cfg.videoSource == "camera"
+
+        val modeLabel = when {
+            isVirtual -> "虚拟副屏 ${controller.activeVirtualWidth}×${controller.activeVirtualHeight}"
+            isCamera -> "远端摄像头 (${cfg.cameraFacing})"
+            else -> "物理主屏"
+        }
+
+        return when (state) {
+            is ScreenState.Streaming -> {
+                val startTime = mirrorSessionStartTimes.getOrPut(key) { System.currentTimeMillis() }
+                val shortText = when {
+                    isVirtual -> "副屏中"
+                    isCamera -> "相机中"
+                    else -> "投屏中"
+                }
+                com.yangyx.adbhelper.service.MirrorLiveNotificationInfo(
+                    sessionId = sessionId,
+                    deviceName = deviceName,
+                    endpoint = endpoint,
+                    modeLabel = modeLabel,
+                    shortCriticalText = shortText,
+                    isConnecting = false,
+                    isPausedResumable = false,
+                    width = state.width,
+                    height = state.height,
+                    fps = state.fps,
+                    latencyMs = state.latencyMs,
+                    videoCodec = cfg.videoCodec,
+                    isAudioEnabled = cfg.isAudioEnabled,
+                    virtualPackage = if (isVirtual) controller.activeVirtualPackage else "",
+                    startedAtMs = startTime
+                )
+            }
+            is ScreenState.Connecting -> {
+                val startTime = mirrorSessionStartTimes.getOrPut(key) { System.currentTimeMillis() }
+                com.yangyx.adbhelper.service.MirrorLiveNotificationInfo(
+                    sessionId = sessionId,
+                    deviceName = deviceName,
+                    endpoint = endpoint,
+                    modeLabel = modeLabel,
+                    shortCriticalText = "连接中",
+                    isConnecting = true,
+                    isPausedResumable = false,
+                    videoCodec = cfg.videoCodec,
+                    isAudioEnabled = cfg.isAudioEnabled,
+                    virtualPackage = if (isVirtual) controller.activeVirtualPackage else "",
+                    startedAtMs = startTime
+                )
+            }
+            else -> {
+                mirrorSessionStartTimes.remove(key)
+                if (isPausedResumable) {
+                    com.yangyx.adbhelper.service.MirrorLiveNotificationInfo(
+                        sessionId = sessionId,
+                        deviceName = deviceName,
+                        endpoint = endpoint,
+                        modeLabel = modeLabel,
+                        shortCriticalText = "已暂停",
+                        isConnecting = false,
+                        isPausedResumable = true,
+                        videoCodec = cfg.videoCodec,
+                        isAudioEnabled = cfg.isAudioEnabled,
+                        virtualPackage = if (isVirtual) controller.activeVirtualPackage else "",
+                        startedAtMs = System.currentTimeMillis()
+                    )
+                } else {
+                    null
+                }
+            }
+        }
+    }
 
     private fun startBackgroundMirroringWatcher() {
         bgMirroringWatchJob?.cancel()
@@ -751,6 +1052,9 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     private val _appShowSystemApps = MutableStateFlow(false)
     val appShowSystemApps: StateFlow<Boolean> = _appShowSystemApps.asStateFlow()
 
+    private val _appShowDisabledOnly = MutableStateFlow(false)
+    val appShowDisabledOnly: StateFlow<Boolean> = _appShowDisabledOnly.asStateFlow()
+
     private val _processFilterMode = MutableStateFlow(0) // 0: 仅第三方应用, 1: 包含系统应用, 2: 全部进程
     val processFilterMode: StateFlow<Int> = _processFilterMode.asStateFlow()
 
@@ -764,6 +1068,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAppShowSystemApps(show: Boolean) {
         _appShowSystemApps.value = show
+    }
+
+    fun setAppShowDisabledOnly(disabledOnly: Boolean) {
+        _appShowDisabledOnly.value = disabledOnly
     }
 
     fun setProcessFilterMode(mode: Int) {
@@ -876,6 +1184,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         _processListState.value = LazyListState(0, 0)
         _appSearchQuery.value = ""
         _appShowSystemApps.value = false
+        _appShowDisabledOnly.value = false
         _processFilterMode.value = 0
     }
 
@@ -1400,6 +1709,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 scrcpyController = null
                 _connectionState.value = ConnectionState.Disconnected
                 com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+                com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(getApplication())
                 resetDeviceSessionStates("", "未连接")
                 forwardManager.stopAllForwards()
                 _reverseRules.value = emptyList()
@@ -1946,6 +2256,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             cancelPreviousConnectTask()
             currentConnectId++
             com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+            com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(getApplication())
             scrcpyController?.stopMirroring()
             scrcpyController = null
             virtualMouseManager.disconnect()
@@ -1958,7 +2269,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun disconnectAll() {
+    fun disconnectAll(stopSessionService: Boolean = true) {
         cancelPreviousConnectTask()
         currentConnectId++
         _sessions.value.forEach { session ->
@@ -1967,7 +2278,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
         _sessions.value = emptyList()
         _currentSessionId.value = null
-        com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+        if (stopSessionService) {
+            com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
+        }
+        com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(getApplication())
         scrcpyController?.stopMirroring()
         scrcpyController = null
         virtualMouseManager.disconnect()
@@ -4672,13 +4986,76 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 _appDiagnosisLogs.value = logSb.toString()
             }
 
+            val targetDeviceId = currentDeviceId.ifBlank { "default" }
             _isAppLoading.value = true
             _appLoadingProgress.value = 0f
-            _appLoadingStatus.value = "正在检索第三方应用..."
-            _actionMessage.value = "正在检索应用与解析 Label..."
-            log("=== 开始获取应用列表及应用名称 ===")
+            _appLoadingStatus.value = "正在通过远端服务采集应用与图标..."
+            _actionMessage.value = "正在检索应用与图标..."
+            log("=== 开始获取应用列表、名称与图标 ===")
 
             try {
+                // Step 0: Prefer Remote AppInfoServer (app_process) for fast offline labels, versions & PNG icons
+                val serverApps = com.yangyx.adbhelper.data.RemoteAppServerManager.collectRemoteApps(
+                    context = getApplication(),
+                    conn = conn,
+                    forceRefresh = force,
+                    parseFallbackName = { parseFriendlyAppName(it) },
+                    onProgressCount = { collectedCount ->
+                        val estProgress = (collectedCount / 180f).coerceIn(0.08f, 0.92f)
+                        _appLoadingProgress.value = estProgress
+                        _appLoadingStatus.value = "正在通过远端服务采集应用与图标 (已收集 $collectedCount 个)..."
+                    },
+                    log = { msg -> log(msg) }
+                )
+
+                if (!serverApps.isNullOrEmpty()) {
+                    _appLoadingProgress.value = 0.95f
+                    _appLoadingStatus.value = "正在核对已停用状态并整理列表..."
+                    val extraDisabled = HashSet<String>()
+                    try {
+                        var disOut = conn.executeShell("pm list packages -d 2>/dev/null", 5000).trim()
+                        if (disOut.isNotEmpty() && disOut.lines().none { it.trim().startsWith("package:") }) {
+                            disOut = conn.executeShell("cmd package list packages -d 2>/dev/null", 5000).trim()
+                        }
+                        disOut.lines().forEach { line ->
+                            val t = line.trim()
+                            if (t.startsWith("package:")) {
+                                val p = t.removePrefix("package:").trim()
+                                if (p.isNotEmpty()) extraDisabled.add(p)
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+
+                    val finalApps = serverApps.map { item ->
+                        if (!item.isDisabled && extraDisabled.contains(item.packageName)) {
+                            item.copy(isDisabled = true)
+                        } else {
+                            item
+                        }
+                    }.sortedBy { it.appName.lowercase() }
+
+                    _installedApps.value = finalApps
+                    currentSession?.let { it.installedApps = finalApps }
+                    finalApps.forEach { item ->
+                        if (item.appName.isNotBlank() && item.appName != item.packageName) {
+                            RemoteAppLabelManager.labelCache[item.packageName] = item.appName
+                        }
+                    }
+                    syncAppAnalysisReportWithLabels(RemoteAppLabelManager.labelCache)
+                    com.yangyx.adbhelper.data.AppIconCacheManager.notifyDeviceIconsRefreshed(targetDeviceId)
+
+                    val systemCount = finalApps.count { it.isSystemApp }
+                    val thirdPartyCount = finalApps.size - systemCount
+                    val iconReadyCount = finalApps.count { it.hasIcon }
+                    log("=== 应用列表加载完成 (AppInfoServer)，共 ${finalApps.size} 个应用 (第三方: $thirdPartyCount 个, 系统: $systemCount 个, 含图标: $iconReadyCount 个) ===")
+                    _actionMessage.value = "已获取 ${finalApps.size} 个应用信息"
+                    return@launch
+                }
+
+                log("远端 AppInfoServer 未就绪，自动切换为 pm + aapt2 兼容解析流程...")
+                _appLoadingStatus.value = "正在检索第三方应用..."
+
                 val labelMap = mutableMapOf<String, String>()
 
                 // Step 1: Query device info for aapt2 diagnostics
@@ -5020,6 +5397,31 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     } catch (_: Exception) {}
                 }
 
+                // Step 6.5: Query disabled packages (-d)
+                val disabledPackages = HashSet<String>()
+                try {
+                    val disabledCmd = if (usedFallbackForUserApps) "cmd package list packages -d 2>&1" else "pm list packages -d 2>&1"
+                    var disabledRaw = conn.executeShell(disabledCmd).trim()
+                    if (!usedFallbackForUserApps &&
+                        disabledRaw.isNotEmpty() &&
+                        disabledRaw.lines().none { it.trim().startsWith("package:") }
+                    ) {
+                        disabledRaw = conn.executeShell("cmd package list packages -d 2>&1").trim()
+                    }
+                    disabledRaw.lines().forEach { line ->
+                        val t = line.trim()
+                        if (t.startsWith("package:")) {
+                            val pkg = t.removePrefix("package:").trim()
+                            if (pkg.isNotEmpty()) {
+                                disabledPackages.add(pkg)
+                            }
+                        }
+                    }
+                    log("  检测到已停用应用共 ${disabledPackages.size} 个")
+                } catch (e: Exception) {
+                    log("  查询已停用应用状态异常: ${e.message}")
+                }
+
                 // Step 7: Assemble application list
                 _appLoadingStatus.value = "正在组装应用列表..."
                 log("6. 组装第三方应用与系统应用列表 (pm list packages -s -f)...")
@@ -5048,6 +5450,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                             packageName = pkg,
                             appName = friendlyName,
                             isSystemApp = false,
+                            isDisabled = disabledPackages.contains(pkg),
                             apkPath = entry.apk,
                             versionName = verPair?.first.orEmpty(),
                             versionCode = verPair?.second ?: 0L
@@ -5069,6 +5472,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                                     packageName = pkg,
                                     appName = friendlyName,
                                     isSystemApp = true,
+                                    isDisabled = disabledPackages.contains(pkg),
                                     apkPath = apk,
                                     versionName = verPair?.first.orEmpty(),
                                     versionCode = verPair?.second ?: 0L
@@ -5085,6 +5489,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                                     packageName = pkg,
                                     appName = friendlyName,
                                     isSystemApp = true,
+                                    isDisabled = disabledPackages.contains(pkg),
                                     apkPath = "",
                                     versionName = verPair?.first.orEmpty(),
                                     versionCode = verPair?.second ?: 0L
@@ -5310,6 +5715,115 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setAppEnabled(packageName: String, enable: Boolean) {
+        val conn = activeConnection ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val actionText = if (enable) "启用" else "停用"
+            try {
+                val commands = if (enable) {
+                    listOf(
+                        "pm enable $packageName 2>&1",
+                        "pm enable --user 0 $packageName 2>&1",
+                        "cmd package enable $packageName 2>&1",
+                        "su -c \"pm enable $packageName\" 2>&1"
+                    )
+                } else {
+                    listOf(
+                        "pm disable-user --user 0 $packageName 2>&1",
+                        "cmd package disable-user --user 0 $packageName 2>&1",
+                        "su -c \"pm disable-user --user 0 $packageName\" 2>&1",
+                        "su -c \"pm disable $packageName\" 2>&1"
+                    )
+                }
+
+                var lastOutput = ""
+                var succeeded = false
+                for (cmd in commands) {
+                    val out = conn.executeShell(cmd).trim()
+                    lastOutput = out
+                    val lower = out.lowercase()
+                    if (enable) {
+                        if (lower.contains("new state: enabled") || lower.contains("new state: default")) {
+                            succeeded = true
+                            break
+                        }
+                    } else {
+                        if (lower.contains("new state: disabled")) {
+                            succeeded = true
+                            break
+                        }
+                    }
+                }
+
+                // 二次核验对端真实停用列表状态，确保 UI 标记完全准确
+                val checkRaw = conn.executeShell("pm list packages -d 2>/dev/null || cmd package list packages -d 2>/dev/null")
+                val isNowDisabled = checkRaw.lines().any { it.trim() == "package:$packageName" }
+                val verifiedSuccess = if (enable) !isNowDisabled else isNowDisabled
+
+                if (succeeded || verifiedSuccess) {
+                    val updatedList = _installedApps.value.map { item ->
+                        if (item.packageName == packageName) {
+                            item.copy(isDisabled = !enable)
+                        } else {
+                            item
+                        }
+                    }
+                    _installedApps.value = updatedList
+                    currentSession?.let { it.installedApps = updatedList }
+                    _actionMessage.value = "已${actionText}应用: $packageName"
+                } else {
+                    val errHint = lastOutput.lines().firstOrNull { it.isNotBlank() } ?: "权限不足或受系统保护限制"
+                    _actionMessage.value = "${actionText}应用失败: $errHint"
+                }
+            } catch (e: Exception) {
+                _actionMessage.value = "${actionText}应用异常: ${e.message}"
+            }
+        }
+    }
+
+    suspend fun loadRemoteAppIcon(
+        context: Context,
+        deviceId: String,
+        app: RemoteAppItem
+    ): androidx.compose.ui.graphics.ImageBitmap? {
+        return com.yangyx.adbhelper.data.AppIconCacheManager.loadOrPullIcon(
+            context = context,
+            deviceId = deviceId.ifBlank { currentDeviceId.ifBlank { "default" } },
+            packageName = app.packageName,
+            remoteIconPath = app.iconRemotePath,
+            hasRemoteIcon = app.hasIcon,
+            connectionProvider = { activeConnection }
+        )
+    }
+
+    suspend fun loadRemoteAppIconByPackage(
+        context: Context,
+        deviceId: String,
+        packageName: String
+    ): androidx.compose.ui.graphics.ImageBitmap? {
+        val known = _installedApps.value.firstOrNull { it.packageName == packageName }
+        return com.yangyx.adbhelper.data.AppIconCacheManager.loadOrPullIcon(
+            context = context,
+            deviceId = deviceId.ifBlank { currentDeviceId.ifBlank { "default" } },
+            packageName = packageName,
+            remoteIconPath = known?.iconRemotePath.orEmpty(),
+            hasRemoteIcon = known?.hasIcon ?: true,
+            connectionProvider = { activeConnection }
+        )
+    }
+
+    fun clearAppIconCache(context: Context) {
+        viewModelScope.launch {
+            val clearedBytes = com.yangyx.adbhelper.data.AppIconCacheManager.clearCache(context)
+            val sizeText = when {
+                clearedBytes >= 1024 * 1024 -> String.format("%.1f MB", clearedBytes / (1024.0 * 1024.0))
+                clearedBytes > 0 -> "${(clearedBytes / 1024).coerceAtLeast(1)} KB"
+                else -> "0 KB"
+            }
+            _actionMessage.value = "已清除应用图标缓存 ($sizeText)"
+        }
+    }
+
     suspend fun runRawShell(cmd: String, timeoutMs: Long = 10000): String = withContext(Dispatchers.IO) {
         val conn = activeConnection ?: return@withContext "未连接设备"
         try {
@@ -5413,6 +5927,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
 
         appAnalysisJob?.cancel()
         appAnalysisJob = viewModelScope.launch(Dispatchers.IO) {
+            val targetDeviceId = currentDeviceId.ifBlank { "default" }
             _isAppAnalysisScanning.value = true
             _appAnalysisProgress.value = 0f
             _appAnalysisStatus.value = "正在检索远端已安装应用..."
@@ -5427,6 +5942,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                     _appAnalysisStatus.value = status
                 }
                 _appAnalysisReport.value = report
+                com.yangyx.adbhelper.data.AppIconCacheManager.notifyDeviceIconsRefreshed(targetDeviceId)
 
                 // If _installedApps has any apps that were missing proper names, enrich them from the analysis result!
                 val curApps = _installedApps.value

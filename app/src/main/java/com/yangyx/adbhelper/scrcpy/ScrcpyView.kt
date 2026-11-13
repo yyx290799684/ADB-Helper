@@ -147,6 +147,7 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import com.yangyx.adbhelper.data.AppIconCacheManager
 import com.yangyx.adbhelper.touch.MultiTouchVisualOverlay
 import com.yangyx.adbhelper.touch.RemoteTouchpadScreen
 import com.yangyx.adbhelper.ui.models.RemoteAppItem
@@ -422,6 +423,8 @@ fun LogConsoleView(
 fun ScrcpyView(
     controller: ScrcpyController,
     installedApps: List<RemoteAppItem> = emptyList(),
+    deviceKey: String = "default",
+    onLoadAppIcon: (suspend (RemoteAppItem) -> androidx.compose.ui.graphics.ImageBitmap?)? = null,
     onRefreshApps: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -1229,15 +1232,28 @@ fun ScrcpyView(
                                 modifier = Modifier.padding(14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Apps,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(28.dp)
-                                )
+                                val matchedApp = installedApps.firstOrNull { it.packageName == pkgName }
+                                if (pkgName.isNotBlank()) {
+                                    val previewApp = matchedApp ?: RemoteAppItem(
+                                        packageName = pkgName,
+                                        appName = selectedAppName.ifEmpty { pkgName }
+                                    )
+                                    ScrcpyRemoteAppIcon(
+                                        app = previewApp,
+                                        deviceKey = deviceKey,
+                                        onLoadAppIcon = onLoadAppIcon,
+                                        size = 32.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Apps,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    val matchedApp = installedApps.firstOrNull { it.packageName == pkgName }
                                     val displayLabel = if (pkgName.isNotBlank()) {
                                         matchedApp?.appName ?: selectedAppName.ifEmpty { pkgName }
                                     } else {
@@ -1490,26 +1506,12 @@ fun ScrcpyView(
                                             modifier = Modifier.padding(12.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Surface(
-                                                shape = CircleShape,
-                                                color = if (app.isSystemApp)
-                                                    MaterialTheme.colorScheme.tertiaryContainer
-                                                else
-                                                    MaterialTheme.colorScheme.primaryContainer,
-                                                modifier = Modifier.size(40.dp)
-                                            ) {
-                                                Box(contentAlignment = Alignment.Center) {
-                                                    Text(
-                                                        text = app.appName.take(1).uppercase(),
-                                                        fontWeight = FontWeight.Bold,
-                                                        fontSize = 16.sp,
-                                                        color = if (app.isSystemApp)
-                                                            MaterialTheme.colorScheme.onTertiaryContainer
-                                                        else
-                                                            MaterialTheme.colorScheme.onPrimaryContainer
-                                                    )
-                                                }
-                                            }
+                                            ScrcpyRemoteAppIcon(
+                                                app = app,
+                                                deviceKey = deviceKey,
+                                                onLoadAppIcon = onLoadAppIcon,
+                                                size = 40.dp
+                                            )
                                             Spacer(modifier = Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
@@ -5517,4 +5519,58 @@ fun ToolbarButtonSortDialog(
         }
     )
 }
+
+@Composable
+private fun ScrcpyRemoteAppIcon(
+    app: RemoteAppItem,
+    deviceKey: String,
+    onLoadAppIcon: (suspend (RemoteAppItem) -> androidx.compose.ui.graphics.ImageBitmap?)?,
+    size: androidx.compose.ui.unit.Dp
+) {
+    val iconCacheVersion by AppIconCacheManager.cacheVersion.collectAsState()
+    val effectiveDeviceKey = deviceKey.ifBlank { "default" }
+    var loadedIcon by remember(effectiveDeviceKey, app.packageName, iconCacheVersion) {
+        mutableStateOf(AppIconCacheManager.getCachedMemory(effectiveDeviceKey, app.packageName))
+    }
+
+    LaunchedEffect(effectiveDeviceKey, app.packageName, app.hasIcon, iconCacheVersion) {
+        if (loadedIcon == null && onLoadAppIcon != null) {
+            loadedIcon = onLoadAppIcon(app)
+        }
+    }
+
+    val bitmap = loadedIcon
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = app.appName,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(size)
+                .clip(RoundedCornerShape(size * 0.24f))
+        )
+    } else {
+        Surface(
+            shape = CircleShape,
+            color = if (app.isSystemApp)
+                MaterialTheme.colorScheme.tertiaryContainer
+            else
+                MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.size(size)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = app.appName.take(1).uppercase(),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = (size.value * 0.4f).sp,
+                    color = if (app.isSystemApp)
+                        MaterialTheme.colorScheme.onTertiaryContainer
+                    else
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+    }
+}
+
 

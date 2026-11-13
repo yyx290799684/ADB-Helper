@@ -43,9 +43,15 @@ import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import androidx.compose.ui.layout.ContentScale
+import com.yangyx.adbhelper.data.AppIconCacheManager
 import com.yangyx.adbhelper.ui.AdbViewModel
 import com.yangyx.adbhelper.ui.ConnectionState
 import com.yangyx.adbhelper.ui.models.*
+
+private val LocalRemoteDeviceKey = compositionLocalOf { "default" }
+private val LocalRemoteIconLoader =
+    compositionLocalOf<(suspend (String) -> androidx.compose.ui.graphics.ImageBitmap?)?> { null }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,6 +74,8 @@ fun LocalAppAnalysisScreen(
     val isScanning by viewModel.isAppAnalysisScanning.collectAsState()
     val scanProgress by viewModel.appAnalysisProgress.collectAsState()
     val scanStatus by viewModel.appAnalysisStatus.collectAsState()
+    val currentSessionId by viewModel.currentSessionId.collectAsState()
+    val deviceKey = remember(currentSessionId) { viewModel.currentDeviceId.ifBlank { "default" } }
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     val tabTitles = listOf(
@@ -176,6 +184,12 @@ fun LocalAppAnalysisScreen(
             .fillMaxSize()
             .navigationBarsPadding()
     ) { innerPadding ->
+        CompositionLocalProvider(
+            LocalRemoteDeviceKey provides deviceKey,
+            LocalRemoteIconLoader provides { pkg ->
+                viewModel.loadRemoteAppIconByPackage(context, deviceKey, pkg)
+            }
+        ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -351,6 +365,7 @@ fun LocalAppAnalysisScreen(
                     onDismiss = { selectedAppForDetail = null }
                 )
             }
+        }
         }
     }
 }
@@ -701,6 +716,8 @@ private fun OverviewSection(
                                     )
                                 }
                             }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            AppIconPreview(app = app, size = 34.dp)
                             Spacer(modifier = Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
@@ -3010,11 +3027,15 @@ private fun InfoBadge(
 }
 
 /**
- * Cached App Icon Preview
+ * Cached App Icon Preview (supports local Drawable & remote ADB-pulled PNG cache)
  */
 @Composable
 private fun AppIconPreview(app: AppAnalysisItem, size: androidx.compose.ui.unit.Dp) {
-    val bitmap = remember(app.packageName) {
+    val deviceKey = LocalRemoteDeviceKey.current
+    val remoteIconLoader = LocalRemoteIconLoader.current
+    val iconCacheVersion by AppIconCacheManager.cacheVersion.collectAsState()
+
+    val localBitmap = remember(app.packageName, app.icon) {
         try {
             app.icon?.toBitmap(80, 80)?.asImageBitmap()
         } catch (_: Exception) {
@@ -3022,10 +3043,27 @@ private fun AppIconPreview(app: AppAnalysisItem, size: androidx.compose.ui.unit.
         }
     }
 
+    var remoteBitmap by remember(deviceKey, app.packageName, iconCacheVersion) {
+        mutableStateOf(
+            if (localBitmap == null) {
+                AppIconCacheManager.getCachedMemory(deviceKey, app.packageName)
+            } else null
+        )
+    }
+
+    LaunchedEffect(deviceKey, app.packageName, iconCacheVersion, localBitmap) {
+        if (localBitmap == null && remoteBitmap == null && remoteIconLoader != null) {
+            remoteBitmap = remoteIconLoader(app.packageName)
+        }
+    }
+
+    val bitmap = localBitmap ?: remoteBitmap
+
     if (bitmap != null) {
         androidx.compose.foundation.Image(
             bitmap = bitmap,
             contentDescription = app.appName,
+            contentScale = ContentScale.Crop,
             modifier = Modifier
                 .size(size)
                 .clip(RoundedCornerShape(size * 0.22f))

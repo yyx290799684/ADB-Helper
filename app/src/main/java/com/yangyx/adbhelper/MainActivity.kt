@@ -1,12 +1,18 @@
 package com.yangyx.adbhelper
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -30,11 +36,13 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Downloading
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Phonelink
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
@@ -49,6 +57,7 @@ import com.yangyx.adbhelper.ui.models.NavItem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -95,6 +104,7 @@ import com.yangyx.adbhelper.ui.screens.DeviceScreen
 import com.yangyx.adbhelper.ui.screens.DeviceInfoScreen
 import com.yangyx.adbhelper.ui.screens.FileExplorerScreen
 import com.yangyx.adbhelper.ui.screens.TerminalScreen
+import com.yangyx.adbhelper.service.MirrorLiveNotificationManager
 import com.yangyx.adbhelper.ui.theme.MyApplicationTheme
 import com.yangyx.adbhelper.widget.WidgetActionReceiver
 import com.yangyx.adbhelper.widget.WidgetUpdateHelper
@@ -143,6 +153,27 @@ class MainActivity : ComponentActivity() {
                 var showWidgetPinningDialog by remember { mutableStateOf(false) }
 
                 var selectedNavIndex by remember { mutableIntStateOf(0) }
+                var hasRequestedNotificationPermission by remember { mutableStateOf(false) }
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    if (granted) {
+                        viewModel.ensureSessionServiceRunning()
+                    }
+                }
+
+                LaunchedEffect(isConnected) {
+                    if (isConnected && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasRequestedNotificationPermission) {
+                        val granted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!granted) {
+                            hasRequestedNotificationPermission = true
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                }
 
                 LaunchedEffect(pendingIntentAction) {
                     val currentIntent = pendingIntentAction ?: return@LaunchedEffect
@@ -187,6 +218,12 @@ class MainActivity : ComponentActivity() {
                         WidgetUpdateHelper.ACTION_WIDGET_START_SCAN -> {
                             isViewingHomeScreen = true
                             viewModel.startLanScan()
+                        }
+                        MirrorLiveNotificationManager.ACTION_RESTORE_MIRROR_SESSION -> {
+                            val targetSessionId = currentIntent.getStringExtra(MirrorLiveNotificationManager.EXTRA_SESSION_ID).orEmpty()
+                            isViewingHomeScreen = false
+                            selectedNavIndex = 0
+                            viewModel.restoreMirrorSessionFromNotification(targetSessionId)
                         }
                     }
                     pendingIntentAction = null
@@ -317,6 +354,8 @@ class MainActivity : ComponentActivity() {
                     val isScrcpyFullscreen by scrcpyController?.isFullscreen?.collectAsState() ?: remember { mutableStateOf(false) }
                     val scrcpyState by scrcpyController?.screenState?.collectAsState() ?: remember { mutableStateOf<ScreenState>(ScreenState.Idle) }
                     val showFullscreen = isScrcpyFullscreen && selectedNavIndex == 0 && scrcpyState is ScreenState.Streaming
+                    val installTask by viewModel.currentInstallTask.collectAsState()
+                    val downloadTask by viewModel.currentDownloadTask.collectAsState()
                     var showDisconnectConfirmDialog by remember { mutableStateOf(false) }
 
                     val activity = LocalContext.current as? Activity
@@ -398,6 +437,40 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     actions = {
+                                        val inst = installTask
+                                        val down = downloadTask
+                                        if (inst != null || down != null) {
+                                            val isAnyRunning = (inst?.isFinished == false) || (down?.isFinished == false)
+                                            val isAnyMinimized = (inst?.isMinimized == true) || (down?.isMinimized == true)
+                                            IconButton(
+                                                onClick = {
+                                                    when {
+                                                        inst != null && inst.isMinimized && !inst.isFinished -> viewModel.minimizeInstallTask(false)
+                                                        down != null && down.isMinimized && !down.isFinished -> viewModel.minimizeDownloadTask(false)
+                                                        inst != null && inst.isMinimized -> viewModel.minimizeInstallTask(false)
+                                                        down != null && down.isMinimized -> viewModel.minimizeDownloadTask(false)
+                                                        inst != null -> viewModel.minimizeInstallTask(false)
+                                                        down != null -> viewModel.minimizeDownloadTask(false)
+                                                    }
+                                                }
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    if (isAnyRunning) {
+                                                        CircularProgressIndicator(
+                                                            modifier = Modifier.size(24.dp),
+                                                            strokeWidth = 2.dp,
+                                                            color = MaterialTheme.colorScheme.primary
+                                                        )
+                                                    }
+                                                    Icon(
+                                                        imageVector = if (inst != null && down == null) Icons.Default.Upload else Icons.Default.Downloading,
+                                                        contentDescription = if (isAnyMinimized) "调出后台任务" else "后台任务详情",
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(if (isAnyRunning) 14.dp else 22.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
                                         IconButton(onClick = { showBottomBarSettingsSheet = true }) {
                                             Icon(
                                                 imageVector = Icons.Default.AutoAwesome,
@@ -499,9 +572,16 @@ class MainActivity : ComponentActivity() {
                                             }
                                     ) {
                                         key(s.id) {
+                                            val sessionDeviceKey = remember(s.id, s.serialNo, s.ip, s.port) {
+                                                if (s.serialNo.isNotBlank()) s.serialNo else "${s.ip}:${s.port}"
+                                            }
                                             ScrcpyView(
                                                 controller = s.scrcpyController,
                                                 installedApps = if (isCurrent) installedApps else emptyList(),
+                                                deviceKey = sessionDeviceKey,
+                                                onLoadAppIcon = if (isCurrent) {
+                                                    { app -> viewModel.loadRemoteAppIcon(context, sessionDeviceKey, app) }
+                                                } else null,
                                                 onRefreshApps = { viewModel.refreshApps() }
                                             )
                                         }
@@ -524,9 +604,14 @@ class MainActivity : ComponentActivity() {
                                         }
                                 ) {
                                     key(fallbackController) {
+                                        val fallbackDeviceKey = viewModel.currentDeviceId.ifBlank { "default" }
                                         ScrcpyView(
                                             controller = fallbackController,
                                             installedApps = installedApps,
+                                            deviceKey = fallbackDeviceKey,
+                                            onLoadAppIcon = { app ->
+                                                viewModel.loadRemoteAppIcon(context, fallbackDeviceKey, app)
+                                            },
                                             onRefreshApps = { viewModel.refreshApps() }
                                         )
                                     }
@@ -567,12 +652,14 @@ class MainActivity : ComponentActivity() {
 
                             // Global Floating Overlay for APK push and install progress
                             com.yangyx.adbhelper.ui.components.ApkInstallOverlay(
-                                viewModel = viewModel
+                                viewModel = viewModel,
+                                modifier = listScreenModifier
                             )
 
                             // Global Floating Overlay for Remote File Download progress
                             com.yangyx.adbhelper.ui.components.FileDownloadOverlay(
-                                viewModel = viewModel
+                                viewModel = viewModel,
+                                modifier = listScreenModifier
                             )
 
                             if (showDisconnectConfirmDialog) {
@@ -657,6 +744,25 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppForegroundStateChanged(true)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            viewModel.onAppForegroundStateChanged(false)
+        }
+    }
+
+    override fun onDestroy() {
+        if (isFinishing && !isChangingConfigurations) {
+            viewModel.onAppActivityFinishing()
+        }
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {

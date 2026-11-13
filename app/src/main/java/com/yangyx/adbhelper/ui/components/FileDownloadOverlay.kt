@@ -73,6 +73,7 @@ fun FileDownloadOverlay(
     modifier: Modifier = Modifier
 ) {
     val downloadTask by viewModel.currentDownloadTask.collectAsState()
+    val installTask by viewModel.currentInstallTask.collectAsState()
     val task = downloadTask ?: return
 
     if (!task.isMinimized) {
@@ -327,10 +328,11 @@ fun FileDownloadOverlay(
         var offsetX by remember { mutableFloatStateOf(0f) }
         var offsetY by remember { mutableFloatStateOf(0f) }
 
+        val topStackOffset = if (installTask?.isMinimized == true) 68.dp else 16.dp
         Box(
             modifier = modifier
                 .fillMaxSize()
-                .padding(16.dp),
+                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp, top = topStackOffset),
             contentAlignment = Alignment.TopEnd
         ) {
             Surface(

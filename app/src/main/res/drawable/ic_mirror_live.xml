@@ -1,0 +1,54 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="50"
+    android:viewportHeight="50">
+
+    <group
+        android:translateX="-29"
+        android:translateY="-30">
+
+        <!-- Top Wireless Arcs -->
+        <path
+            android:pathData="M 44,39 A 12,12 0 0,1 64,39"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.4"
+            android:strokeAlpha="0.7"
+            android:strokeLineCap="round" />
+
+        <path
+            android:pathData="M 48,42.5 A 7.5,7.5 0 0,1 60,42.5"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.4"
+            android:strokeAlpha="0.92"
+            android:strokeLineCap="round" />
+
+        <!-- Antennas -->
+        <path
+            android:pathData="M 44,50 L 38,40"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="3.2"
+            android:strokeLineCap="round" />
+
+        <path
+            android:pathData="M 64,50 L 70,40"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="3.2"
+            android:strokeLineCap="round" />
+
+        <!-- Android Head with Transparent Terminal Prompt Cutouts -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M 35,68 C 33.5,68 33,67.5 33,66 A 21,21 0 0,1 75,66 C 75,67.5 74.5,68 73,68 Z M 40.8,53.2 L 49.1,59.0 L 40.8,64.8 L 39.2,62.3 L 44.4,59.0 L 39.2,55.7 Z M 52,62.0 H 63 A 1.5,1.5 0 0,1 63,65.0 H 52 A 1.5,1.5 0 0,1 52,62.0 Z M 55.5,56 A 2.0,2.0 0 1,0 59.5,56 A 2.0,2.0 0 1,0 55.5,56 Z" />
+
+        <!-- Bottom Bridge Base -->
+        <path
+            android:pathData="M 46.5,71 h 15 a 2.5,2.5 0 0,1 2.5,2.5 v 0 a 2.5,2.5 0 0,1 -2.5,2.5 h -15 a 2.5,2.5 0 0,1 -2.5,-2.5 v 0 a 2.5,2.5 0 0,1 2.5,-2.5 z"
+            android:fillColor="#FFFFFF"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="1.2" />
+
+    </group>
+
+</vector>
