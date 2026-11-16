@@ -13,6 +13,8 @@ class AdbStream(
     @Volatile
     var isClosed: Boolean = false
         private set
+    @Volatile
+    var rejectedByPeer: Boolean = false
 
     private val readQueue = LinkedBlockingQueue<ByteArray>()
 

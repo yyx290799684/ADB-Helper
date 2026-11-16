@@ -57,6 +57,10 @@ object WidgetStateHolder {
         private set
 
     @Volatile
+    var deviceSerial: String = ""
+        private set
+
+    @Volatile
     var connectedDeviceCount: Int = 0
         private set
 
@@ -93,13 +97,24 @@ object WidgetStateHolder {
             vm.currentSession?.connection ?: vm.sessions.value.firstOrNull()?.connection
         }
 
-    fun onConnected(session: AdbDeviceSession?, name: String, ip: String, count: Int = 1) {
+    fun onConnected(session: AdbDeviceSession?, name: String, ip: String, count: Int = 1, serial: String = session?.serialNo ?: "") {
         currentState = State.CONNECTED
         deviceName = name
         deviceIp = ip
+        if (serial.isNotBlank()) deviceSerial = serial
         connectedDeviceCount = count
         activeSession = session
         lastConnectedCheckTimestamp = System.currentTimeMillis()
+    }
+
+    fun restoreConnectedFromSnapshot(name: String, ip: String, serial: String) {
+        if (currentState == State.DISCONNECTED) {
+            currentState = State.CONNECTED
+            deviceName = name
+            deviceIp = ip
+            deviceSerial = serial
+            connectedDeviceCount = 1
+        }
     }
 
     fun onConnecting(name: String = "", ip: String = "") {
@@ -110,6 +125,7 @@ object WidgetStateHolder {
 
     fun onDisconnected() {
         currentState = State.DISCONNECTED
+        deviceSerial = ""
         connectedDeviceCount = 0
         activeSession = null
         lastConnectedCheckTimestamp = 0L

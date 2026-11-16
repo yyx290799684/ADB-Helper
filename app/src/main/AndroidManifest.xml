@@ -111,6 +111,8 @@
                 <action android:name="com.yangyx.adbhelper.widget.ACTION_DISCONNECT" />
                 <action android:name="com.yangyx.adbhelper.widget.ACTION_EXECUTE_ACTION" />
                 <action android:name="com.yangyx.adbhelper.widget.ACTION_START_SCAN" />
+                <action android:name="com.yangyx.adbhelper.widget.ACTION_HEALTH_CHECK" />
+                <action android:name="com.yangyx.adbhelper.widget.ACTION_EXPIRE_SCAN" />
             </intent-filter>
         </receiver>
         <!-- 投屏实时动态通知操作广播接收器 -->

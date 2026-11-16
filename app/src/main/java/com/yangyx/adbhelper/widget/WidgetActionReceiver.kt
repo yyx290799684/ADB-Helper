@@ -100,9 +100,11 @@ class WidgetActionReceiver : BroadcastReceiver() {
                                 session.connection.disconnect()
                             } catch (_: Exception) {}
                         }
-                        AdbViewModel.currentInstance?.disconnectCurrentSession()
+                        AdbViewModel.currentInstance?.disconnectAll(stopSessionService = true)
                         WidgetStateHolder.onDisconnected()
+                        WidgetUpdateHelper.clearWidgetConnectedSnapshot(context)
                         WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(context)
+                        com.yangyx.adbhelper.service.AdbSessionService.stopService(context)
                         WidgetUpdateHelper.updateAllWidgets(context)
                         showToast(context, "已断开 ADB 连接")
                     }
@@ -193,75 +195,19 @@ class WidgetActionReceiver : BroadcastReceiver() {
                             WidgetUpdateHelper.updateAllWidgets(context)
                         }
 
-                        // 2. 检查已连接设备连接状态：只有确实断开且 IP 端口不可达（无法自动恢复）才切回未连接状态
-                        if (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
-                            val vm = AdbViewModel.currentInstance
-                            val vmSession = vm?.currentSession ?: vm?.sessions?.value?.firstOrNull()
-                            val activeSession = WidgetStateHolder.activeSession ?: vmSession
-                            val conn = activeSession?.connection ?: WidgetStateHolder.activeConnection
+                        // 2. 10 分钟连接存活检测：支持真实通信探活、后台/进程恢复后自动重连与重试，确认无法连接再回到未连接状态
+                        val snapshot = WidgetUpdateHelper.loadWidgetConnectedSnapshot(context)
+                        val existingVm = AdbViewModel.currentInstance
+                        val hasLogicalConnection =
+                            (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) ||
+                            (snapshot != null) ||
+                            (existingVm?.connectionState?.value is ConnectionState.Connected) ||
+                            (existingVm?.sessions?.value?.isNotEmpty() == true)
 
-                            // 优先判断：若 App 内会话仍然保持已连接状态，则小部件必须保持已连接
-                            val isAppConnected = vm != null &&
-                                    vm.connectionState.value is ConnectionState.Connected &&
-                                    vmSession?.connection?.isConnected == true
-
-                            val isConnAlive = conn != null && conn.isConnectionAlive()
-
-                            if (isAppConnected || isConnAlive) {
-                                if (isAppConnected && vmSession != null && WidgetStateHolder.activeSession == null) {
-                                    WidgetStateHolder.onConnected(vmSession, vmSession.deviceName, "${vmSession.ip}:${vmSession.port}", vm.sessions.value.size)
-                                }
-                                WidgetUpdateHelper.checkAndRefreshMediaStateIfNeeded(context)
-                                WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
-                            } else {
-                                // 会话暂不可用，进一步检测目标 IP 与端口是否可达
-                                val rawAddress = WidgetStateHolder.deviceIp
-                                val targetIp = conn?.ip?.ifBlank { null }
-                                    ?: activeSession?.ip?.ifBlank { null }
-                                    ?: rawAddress.substringBefore(":").ifBlank { "" }
-                                val targetPort = conn?.port?.takeIf { it > 0 }
-                                    ?: activeSession?.port?.takeIf { it > 0 }
-                                    ?: (rawAddress.substringAfter(":", "5555").toIntOrNull() ?: 5555)
-
-                                val isUsb = conn?.isUsb == true || activeSession?.connection?.isUsb == true
-                                val isReachable = if (isUsb) {
-                                    conn?.usbConnection != null
-                                } else if (targetIp.isNotBlank()) {
-                                    WidgetUpdateHelper.isPortReachable(targetIp, targetPort, timeoutMs = 2500)
-                                } else {
-                                    false
-                                }
-
-                                if (isReachable) {
-                                    // IP 端口可达，尝试自动重连恢复会话，暂不回到未连接状态
-                                    val reconnected = conn?.ensureConnected(3000) ?: false
-                                    if (reconnected && activeSession != null) {
-                                        WidgetStateHolder.onConnected(activeSession, activeSession.deviceName, "${activeSession.ip}:${activeSession.port}")
-                                    }
-                                    WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
-                                } else {
-                                    // 延迟 1.5 秒进行二次复检，防止瞬时网络抖动
-                                    kotlinx.coroutines.delay(1500L)
-                                    val secondReachable = if (isUsb) {
-                                        conn?.usbConnection != null
-                                    } else if (targetIp.isNotBlank()) {
-                                        WidgetUpdateHelper.isPortReachable(targetIp, targetPort, timeoutMs = 2500)
-                                    } else {
-                                        false
-                                    }
-
-                                    if (!secondReachable) {
-                                        // 确实连接断了且 IP 端口不可达（无法自动恢复连接），恢复到未连接状态
-                                        AdbViewModel.currentInstance?.disconnectCurrentSession()
-                                        WidgetStateHolder.onDisconnected()
-                                        com.yangyx.adbhelper.service.AdbSessionService.stopService(context)
-                                        WidgetUpdateHelper.updateAllWidgets(context)
-                                        WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(context)
-                                    } else {
-                                        WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(context, 10 * 60 * 1000L)
-                                    }
-                                }
-                            }
+                        if (hasLogicalConnection) {
+                            val app = context.applicationContext as Application
+                            val vm = AdbViewModel.getOrCreate(app)
+                            vm.performConnectionHealthCheck(context, force = true)
                         }
                     }
                 }
@@ -313,90 +259,143 @@ class WidgetActionReceiver : BroadcastReceiver() {
         }
 
         // 2. 对于直接发送底层 ADB 模拟指令的快捷操作
-        val connection = WidgetStateHolder.activeConnection
-        if (connection == null || !connection.isConnected) {
+        val existingVm = AdbViewModel.currentInstance
+        val currentConn = WidgetStateHolder.activeConnection ?: existingVm?.activeConnection
+        val snapshot = WidgetUpdateHelper.loadWidgetConnectedSnapshot(context)
+        val hasLogicalConnection =
+            (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) ||
+            (currentConn != null) ||
+            (snapshot != null) ||
+            (existingVm?.connectionState?.value is ConnectionState.Connected)
+
+        if (!hasLogicalConnection) {
+            WidgetStateHolder.onDisconnected()
+            WidgetUpdateHelper.updateAllWidgets(context)
             showToast(context, "未连接 ADB 设备，请先点击快速连接")
             return
         }
 
+        val app = context.applicationContext as Application
+        val adbVm = AdbViewModel.getOrCreate(app)
+
+        var targetConn = currentConn?.takeIf { it.isConnected }
+        if (targetConn == null) {
+            showToast(context, "连接已断开，正在尝试自动重连...")
+            targetConn = adbVm.reconnectAndEnsureSession(
+                fallbackIp = snapshot?.ip ?: "",
+                fallbackPort = snapshot?.port ?: 5555,
+                fallbackName = snapshot?.name ?: "",
+                fallbackSerial = snapshot?.serialNo ?: "",
+                timeoutMs = 4500,
+                forceWireProbe = false
+            )
+            if (targetConn == null) {
+                adbVm.handleUnrecoverableWidgetDisconnect()
+                showToast(context, "自动重连失败，设备已回到未连接状态")
+                return
+            }
+        }
+
         try {
-            when (actionType) {
-                WidgetActionType.LOCK -> {
-                    connection.executeShell("input keyevent 26")
-                    showToast(context, "已发送锁屏/电源指令")
-                }
-                WidgetActionType.SCREENSHOT -> {
-                    val time = System.currentTimeMillis()
-                    val filename = "/sdcard/Pictures/Screenshots/screenshot_$time.png"
-                    connection.executeShell("mkdir -p /sdcard/Pictures/Screenshots && screencap -p $filename 2>/dev/null || screencap -p /sdcard/screenshot.png")
-                    showToast(context, "截屏指令已发送，画面已保存")
-                }
-                WidgetActionType.HOME -> {
-                    connection.executeShell("input keyevent 3")
-                    showToast(context, "已发送返回主页指令")
-                }
-                WidgetActionType.BACK -> {
-                    connection.executeShell("input keyevent 4")
-                    showToast(context, "已发送返回指令")
-                }
-                WidgetActionType.RECENTS -> {
-                    connection.executeShell("input keyevent 187")
-                    showToast(context, "已发送多任务切换指令")
-                }
-                WidgetActionType.MUTE -> {
-                    connection.executeShell("input keyevent 164")
-                    showToast(context, "已发送静音切换指令")
-                }
-                WidgetActionType.NOTIFICATIONS -> {
-                    connection.executeShell("cmd statusbar expand-notifications 2>/dev/null || service call statusbar 1 2>/dev/null || input keyevent 83")
-                    showToast(context, "已展开下拉通知栏")
-                }
-                WidgetActionType.VOLUME_DOWN -> {
-                    connection.executeShell("input keyevent 25")
-                    showToast(context, "音量 -")
-                }
-                WidgetActionType.VOLUME_UP -> {
-                    connection.executeShell("input keyevent 24")
-                    showToast(context, "音量 +")
-                }
-                WidgetActionType.SCREEN_OFF -> {
-                    connection.executeShell("input keyevent 223")
-                    showToast(context, "已发送息屏指令")
-                }
-                WidgetActionType.WAKEUP -> {
-                    connection.executeShell("input keyevent 224")
-                    showToast(context, "已发送唤醒指令")
-                }
-                WidgetActionType.PLAY_PAUSE -> {
-                    // 1. 发送与设备控制页面完全一致的全局媒体播放/暂停按键 (KEYCODE_MEDIA_PLAY_PAUSE = 85)
-                    // 无论当前是播放还是暂停，系统都会无条件执行切换，不会被错误的子指令拦截
-                    connection.executeShell("input keyevent 85")
+            performShellWidgetAction(context, targetConn, actionType, adbVm)
+        } catch (_: Exception) {
+            // 若原 Socket 处于半开或 IP 变更导致指令失败，与主程序一致优先尝试完整自动重连后再重试执行
+            showToast(context, "连接异常，正在重新建立会话...")
+            val recoveredConn = adbVm.reconnectAndEnsureSession(
+                fallbackIp = snapshot?.ip ?: "",
+                fallbackPort = snapshot?.port ?: 5555,
+                fallbackName = snapshot?.name ?: "",
+                fallbackSerial = snapshot?.serialNo ?: "",
+                timeoutMs = 4500,
+                forceWireProbe = true
+            )
+            if (recoveredConn != null) {
+                try {
+                    performShellWidgetAction(context, recoveredConn, actionType, adbVm)
+                    return
+                } catch (_: Exception) {}
+            }
+            adbVm.handleUnrecoverableWidgetDisconnect()
+            showToast(context, "无法重新建立连接，设备已回到未连接状态")
+        }
+    }
 
-                    // 2. 状态取反并即时更新桌面小部件（瞬时给用户视觉与触控反馈）
-                    val willBePlaying = !WidgetStateHolder.isMediaPlaying
-                    WidgetStateHolder.updateMediaPlaybackState(willBePlaying)
-                    WidgetUpdateHelper.updateAllWidgets(context)
+    private fun performShellWidgetAction(
+        context: Context,
+        connection: com.yangyx.adbhelper.adb.AdbConnection,
+        actionType: WidgetActionType,
+        adbVm: AdbViewModel
+    ) {
+        when (actionType) {
+            WidgetActionType.LOCK -> {
+                connection.executeShell("input keyevent 26")
+                showToast(context, "已发送锁屏/电源指令")
+            }
+            WidgetActionType.SCREENSHOT -> {
+                val time = System.currentTimeMillis()
+                val filename = "/sdcard/Pictures/Screenshots/screenshot_$time.png"
+                connection.executeShell("mkdir -p /sdcard/Pictures/Screenshots && screencap -p $filename 2>/dev/null || screencap -p /sdcard/screenshot.png")
+                showToast(context, "截屏指令已发送，画面已保存")
+            }
+            WidgetActionType.HOME -> {
+                connection.executeShell("input keyevent 3")
+                showToast(context, "已发送返回主页指令")
+            }
+            WidgetActionType.BACK -> {
+                connection.executeShell("input keyevent 4")
+                showToast(context, "已发送返回指令")
+            }
+            WidgetActionType.RECENTS -> {
+                connection.executeShell("input keyevent 187")
+                showToast(context, "已发送多任务切换指令")
+            }
+            WidgetActionType.MUTE -> {
+                connection.executeShell("input keyevent 164")
+                showToast(context, "已发送静音切换指令")
+            }
+            WidgetActionType.NOTIFICATIONS -> {
+                connection.executeShell("cmd statusbar expand-notifications 2>/dev/null || service call statusbar 1 2>/dev/null || input keyevent 83")
+                showToast(context, "已展开下拉通知栏")
+            }
+            WidgetActionType.VOLUME_DOWN -> {
+                connection.executeShell("input keyevent 25")
+                showToast(context, "音量 -")
+            }
+            WidgetActionType.VOLUME_UP -> {
+                connection.executeShell("input keyevent 24")
+                showToast(context, "音量 +")
+            }
+            WidgetActionType.SCREEN_OFF -> {
+                connection.executeShell("input keyevent 223")
+                showToast(context, "已发送息屏指令")
+            }
+            WidgetActionType.WAKEUP -> {
+                connection.executeShell("input keyevent 224")
+                showToast(context, "已发送唤醒指令")
+            }
+            WidgetActionType.PLAY_PAUSE -> {
+                // 1. 发送与设备控制页面完全一致的全局媒体播放/暂停按键 (KEYCODE_MEDIA_PLAY_PAUSE = 85)
+                connection.executeShell("input keyevent 85")
 
-                    showToast(context, if (willBePlaying) "已发送播放指令" else "已发送暂停指令")
+                // 2. 状态取反并即时更新桌面小部件（瞬时给用户视觉与触控反馈）
+                val willBePlaying = !WidgetStateHolder.isMediaPlaying
+                WidgetStateHolder.updateMediaPlaybackState(willBePlaying)
+                WidgetUpdateHelper.updateAllWidgets(context)
 
-                    // 3. 延时 400ms 与远端对齐真实播放状态 (与 AdbViewModel.mediaPlayPause 保持完全一致的节奏)
-                    receiverScope.launch {
-                        kotlinx.coroutines.delay(400L)
-                        val vm = AdbViewModel.currentInstance
-                        if (vm != null) {
-                            vm.fetchMediaPlaybackInfo()
-                        }
-                        val actual = WidgetUpdateHelper.queryMediaPlayingState(connection)
-                        if (WidgetStateHolder.isMediaPlaying != actual) {
-                            WidgetStateHolder.updateMediaPlaybackState(actual)
-                            WidgetUpdateHelper.updateAllWidgets(context)
-                        }
+                showToast(context, if (willBePlaying) "已发送播放指令" else "已发送暂停指令")
+
+                // 3. 延时 400ms 与远端对齐真实播放状态 (与 AdbViewModel.mediaPlayPause 保持完全一致的节奏)
+                receiverScope.launch {
+                    kotlinx.coroutines.delay(400L)
+                    adbVm.fetchMediaPlaybackInfo()
+                    val actual = WidgetUpdateHelper.queryMediaPlayingState(connection)
+                    if (WidgetStateHolder.isMediaPlaying != actual) {
+                        WidgetStateHolder.updateMediaPlaybackState(actual)
+                        WidgetUpdateHelper.updateAllWidgets(context)
                     }
                 }
-                else -> {}
             }
-        } catch (e: Exception) {
-            showToast(context, "执行指令失败: ${e.message}")
+            else -> {}
         }
     }
 

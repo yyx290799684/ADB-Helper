@@ -17,8 +17,8 @@ android {
     applicationId = "com.yangyx.adbhelper"
     minSdk = 24
     targetSdk = 36
-    versionCode = 20
-    versionName = "2.6.0"
+    versionCode = 21
+    versionName = "2.6.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

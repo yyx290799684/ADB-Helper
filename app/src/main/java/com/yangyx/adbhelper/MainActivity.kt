@@ -206,14 +206,17 @@ class MainActivity : ComponentActivity() {
                             isViewingHomeScreen = false
                             selectedNavIndex = 1
                             viewModel.currentSession?.selectedNavIndex = 1
+                            viewModel.ensureSessionFromWidgetOpen()
                         }
                         WidgetUpdateHelper.ACTION_WIDGET_TERMINAL -> {
                             isViewingHomeScreen = false
                             selectedNavIndex = 2
                             viewModel.currentSession?.selectedNavIndex = 2
+                            viewModel.ensureSessionFromWidgetOpen()
                         }
                         WidgetUpdateHelper.ACTION_WIDGET_OPEN_DEVICE -> {
                             isViewingHomeScreen = false
+                            viewModel.ensureSessionFromWidgetOpen()
                         }
                         WidgetUpdateHelper.ACTION_WIDGET_START_SCAN -> {
                             isViewingHomeScreen = true

@@ -694,36 +694,87 @@ fun ScrcpyView(
                 }
             }
             is ScreenState.Error -> {
+                val isCodecRelated = state.message.contains("编码") ||
+                    state.message.contains("H.265", ignoreCase = true) ||
+                    state.message.contains("AV1", ignoreCase = true) ||
+                    state.message.contains("Killed", ignoreCase = true)
+                val canQuickSwitchToH264 = isCodecRelated &&
+                    (!config.videoCodec.equals("h264", ignoreCase = true) || config.videoEncoder.isNotBlank())
+
                 Column(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(24.dp),
+                        .padding(24.dp)
+                        .widthIn(max = 460.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(44.dp)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "投屏连接异常",
+                        text = if (isCodecRelated) "视频编码不受支持" else "投屏连接异常",
                         style = MaterialTheme.typography.titleLarge,
                         color = MaterialTheme.colorScheme.error,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = state.message,
                         color = MaterialTheme.colorScheme.onBackground,
-                        fontSize = 14.sp
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                        textAlign = TextAlign.Center
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(18.dp))
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Button(onClick = { controller.startMirroring() }) {
+                    if (canQuickSwitchToH264) {
+                        Button(
+                            onClick = {
+                                controller.updateConfig(
+                                    config.copy(
+                                        videoCodec = "h264",
+                                        videoEncoder = ""
+                                    )
+                                )
+                                controller.startMirroring()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Icon(Icons.Default.Refresh, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("重试连接")
+                            Text("切换为 H.264 编码并重试")
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (!canQuickSwitchToH264) {
+                            Button(onClick = { controller.startMirroring() }) {
+                                Icon(Icons.Default.Refresh, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("重试连接")
+                            }
+                        } else {
+                            FilledTonalButton(onClick = { controller.startMirroring() }) {
+                                Icon(Icons.Default.Refresh, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("重试")
+                            }
+                        }
+                        FilledTonalButton(onClick = { showSettingsSheet = true }) {
+                            Icon(Icons.Default.Settings, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("投屏设置")
                         }
                         OutlinedButton(onClick = { showLogsSheet = true }) {
                             Icon(Icons.Default.Terminal, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("查看部署日志")
+                            Text("日志")
                         }
                     }
                 }

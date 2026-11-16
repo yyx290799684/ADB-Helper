@@ -676,6 +676,54 @@ class ScrcpyController(
                 addLog("启动官方 scrcpy-server (v$serverVersion, ${cfg.videoCodec}, ${if (isCamera) "Camera" else "Display"}) 进程: $serverCmd", LogLevel.INFO)
 
                 var serverProcessStream: AdbStream? = null
+                val activeVideoStreamRef = java.util.concurrent.atomic.AtomicReference<AdbStream?>(null)
+                val hasDecodedAnyFrame = java.util.concurrent.atomic.AtomicBoolean(false)
+                val sawEncoderError = java.util.concurrent.atomic.AtomicBoolean(false)
+                val failedCodecName = java.util.concurrent.atomic.AtomicReference<String?>(null)
+                val sawKilled = java.util.concurrent.atomic.AtomicBoolean(false)
+                val firstServerErrorMsg = java.util.concurrent.atomic.AtomicReference<String?>(null)
+                val serverStdoutEnded = java.util.concurrent.atomic.AtomicBoolean(false)
+                val supportedCodecs = java.util.Collections.synchronizedSet(linkedSetOf<String>())
+
+                suspend fun resolveServerFailureMessage(defaultMessage: String): String {
+                    for (i in 0 until 10) {
+                        if (serverStdoutEnded.get() || (sawEncoderError.get() && sawKilled.get())) break
+                        kotlinx.coroutines.delay(35)
+                    }
+                    val rawCodec = (failedCodecName.get() ?: cfg.videoCodec).lowercase()
+                    val requestedCodecLabel = when {
+                        rawCodec.contains("265") || rawCodec.contains("hevc") -> "H.265 (HEVC)"
+                        rawCodec.contains("av1") || rawCodec.contains("av01") -> "AV1"
+                        rawCodec.contains("264") || rawCodec.contains("avc") -> "H.264"
+                        else -> rawCodec.uppercase()
+                    }
+                    val supportedText = synchronized(supportedCodecs) { supportedCodecs.joinToString(" / ") }
+                    val capturedErr = firstServerErrorMsg.get()
+
+                    return when {
+                        sawEncoderError.get() -> {
+                            when {
+                                cfg.videoEncoder.isNotBlank() ->
+                                    "编码器不兼容：被控端不支持指定的编码器「${cfg.videoEncoder}」${if (supportedText.isNotBlank()) "（对端支持：$supportedText）" else ""}。请在投屏设置中清空自定义编码器或切换为 H.264。"
+                                !requestedCodecLabel.startsWith("H.264") ->
+                                    "视频编码不受支持：被控端不支持 $requestedCodecLabel 编码${if (supportedText.isNotBlank()) "（对端支持：$supportedText）" else ""}，导致投屏进程被终止 (Killed)。请在投屏设置中切换为 H.264 后重试。"
+                                else ->
+                                    "被控端视频编码器初始化失败（$requestedCodecLabel），可能不支持当前分辨率或帧率，建议在投屏设置中降低分辨率/帧率或切换编码器。"
+                            }
+                        }
+                        capturedErr != null ->
+                            "投屏服务端异常：$capturedErr"
+                        sawKilled.get() -> {
+                            if (!cfg.videoCodec.equals("h264", ignoreCase = true)) {
+                                "投屏进程异常终止 (Killed)：当前选择的 ${cfg.videoCodec.uppercase()} 视频编码可能不被对端设备支持，建议在投屏设置中切换为 H.264 后重试。"
+                            } else {
+                                "投屏服务端被系统终止 (Killed)，请查看部署日志排查原因。"
+                            }
+                        }
+                        else -> defaultMessage
+                    }
+                }
+
                 try {
                     serverProcessStream = connection.openStream("shell:$serverCmd")
                     addLog("scrcpy-server 进程启动命令已发送", LogLevel.SUCCESS)
@@ -687,7 +735,39 @@ class ScrcpyController(
                             while (streamingJob?.isActive == true && !procStream.isClosed) {
                                 val line = reader.readLine() ?: break
                                 if (line.isNotBlank()) {
-                                    addLog("[scrcpy-server] $line", LogLevel.INFO)
+                                    val trimmed = line.trim()
+                                    val isErrorLine = trimmed.contains("ERROR:", ignoreCase = true) ||
+                                        trimmed.contains("Exception", ignoreCase = true) ||
+                                        trimmed.contains("Failed to initialize", ignoreCase = true) ||
+                                        trimmed.equals("Killed", ignoreCase = true)
+                                    addLog("[scrcpy-server] $line", if (isErrorLine) LogLevel.ERROR else LogLevel.INFO)
+
+                                    Regex("""Could not create default video encoder for ([a-zA-Z0-9_]+)""", RegexOption.IGNORE_CASE)
+                                        .find(trimmed)?.let { m ->
+                                            sawEncoderError.set(true)
+                                            failedCodecName.set(m.groupValues[1])
+                                        }
+                                    if (trimmed.contains("Could not create video encoder", ignoreCase = true) ||
+                                        trimmed.contains("SurfaceEncoder", ignoreCase = true) ||
+                                        (trimmed.contains("MediaCodec", ignoreCase = true) && trimmed.contains("Exception", ignoreCase = true))
+                                    ) {
+                                        sawEncoderError.set(true)
+                                    }
+                                    Regex("""Failed to initialize (video/[a-zA-Z0-9_.-]+)""", RegexOption.IGNORE_CASE)
+                                        .find(trimmed)?.let { m ->
+                                            sawEncoderError.set(true)
+                                            failedCodecName.set(m.groupValues[1])
+                                        }
+                                    Regex("""--video-codec=([a-zA-Z0-9_]+)""").find(trimmed)?.let { m ->
+                                        supportedCodecs.add(m.groupValues[1].uppercase())
+                                    }
+                                    if (trimmed.equals("Killed", ignoreCase = true)) {
+                                        sawKilled.set(true)
+                                    }
+                                    if (trimmed.contains("[server] ERROR:", ignoreCase = true) && firstServerErrorMsg.get() == null) {
+                                        firstServerErrorMsg.set(trimmed.substringAfter("[server] ERROR:").trim())
+                                    }
+
                                     // Parse: "INFO: New display: 1220x2712/240 (id=21)" or "Display: ... (id=...)"
                                     if (line.contains("New display", ignoreCase = true) || line.contains("Display:", ignoreCase = true)) {
                                         val idMatch = Regex("""\(id=(\d+)\)""").find(line)
@@ -708,6 +788,13 @@ class ScrcpyController(
                             }
                         } catch (e: Exception) {
                             addLog("[scrcpy-server] 进程输出流关闭: ${e.message}", LogLevel.INFO)
+                        } finally {
+                            serverStdoutEnded.set(true)
+                            if (!isExplicitlyStopped && !hasDecodedAnyFrame.get() &&
+                                (sawEncoderError.get() || sawKilled.get() || firstServerErrorMsg.get() != null)) {
+                                kotlinx.coroutines.delay(80)
+                                try { activeVideoStreamRef.get()?.close() } catch (_: Exception) {}
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -716,14 +803,16 @@ class ScrcpyController(
                     return@launch
                 }
 
-                addLog("正在初始化 GPU 硬件 H.264 解码器 (${renderW}x${renderH})...", LogLevel.INFO)
+                addLog("正在初始化 GPU 硬件 ${cfg.videoCodec.uppercase()} 解码器 (${renderW}x${renderH})...", LogLevel.INFO)
 
                 var videoStream: AdbStream? = null
                 addLog("正在尝试连接 scrcpy 专属视频通道 (localabstract:scrcpy)...", LogLevel.INFO)
                 for (attempt in 1..20) {
                     if (streamingJob?.isActive != true) break
+                    if (serverStdoutEnded.get() && (sawEncoderError.get() || sawKilled.get() || firstServerErrorMsg.get() != null)) break
                     try {
                         videoStream = connection.openStream("localabstract:scrcpy")
+                        activeVideoStreamRef.set(videoStream)
                         addLog("成功连接 scrcpy-server 视频 Socket! (尝试第 $attempt 次)", LogLevel.SUCCESS)
                         break
                     } catch (e: Exception) {
@@ -733,8 +822,9 @@ class ScrcpyController(
                 }
 
                 if (videoStream == null) {
-                    addLog("无法连接到 scrcpy 视频 Socket！请查看上方 [scrcpy-server] 的调试输出", LogLevel.ERROR)
-                    _screenState.value = ScreenState.Error("无法连接 scrcpy 视频通道，请点击【查看日志】排查")
+                    val errMsg = resolveServerFailureMessage("无法连接 scrcpy 视频通道，请点击【查看日志】排查")
+                    addLog("投屏失败诊断: $errMsg", LogLevel.ERROR)
+                    _screenState.value = ScreenState.Error(errMsg)
                     try { serverProcessStream.close() } catch (_: Exception) {}
                     return@launch
                 }
@@ -919,8 +1009,9 @@ class ScrcpyController(
                 // 1. Read 1 dummy connection byte sent by scrcpy server
                 val dummyBuf = ByteArray(1)
                 if (!stream.readFully(dummyBuf, 0, 1)) {
-                    addLog("读取 scrcpy Dummy 握手字节失败", LogLevel.ERROR)
-                    _screenState.value = ScreenState.Error("连接 scrcpy 失败: 握手中断")
+                    val errMsg = resolveServerFailureMessage("连接 scrcpy 失败: 握手中断")
+                    addLog("读取 scrcpy Dummy 握手字节失败 -> $errMsg", LogLevel.ERROR)
+                    _screenState.value = ScreenState.Error(errMsg)
                     try { stream.close() } catch (_: Exception) {}
                     try { serverProcessStream?.close() } catch (_: Exception) {}
                     return@launch
@@ -931,8 +1022,9 @@ class ScrcpyController(
                 addLog("开始读取 scrcpy 64 字节设备头...", LogLevel.INFO)
                 val deviceHeaderBuf = ByteArray(64)
                 if (!stream.readFully(deviceHeaderBuf, 0, 64)) {
-                    addLog("读取 scrcpy 设备头失败 (Socket 已关闭)", LogLevel.ERROR)
-                    _screenState.value = ScreenState.Error("读取 scrcpy 设备头失败")
+                    val errMsg = resolveServerFailureMessage("读取 scrcpy 设备头失败")
+                    addLog("读取 scrcpy 设备头失败 (Socket 已关闭) -> $errMsg", LogLevel.ERROR)
+                    _screenState.value = ScreenState.Error(errMsg)
                     try { stream.close() } catch (_: Exception) {}
                     try { serverProcessStream?.close() } catch (_: Exception) {}
                     return@launch
@@ -945,8 +1037,9 @@ class ScrcpyController(
                 addLog("开始读取 scrcpy 视频流 Codec 元数据 (4 字节 FourCC)...", LogLevel.INFO)
                 val codecHeaderBuf = ByteArray(4)
                 if (!stream.readFully(codecHeaderBuf, 0, 4)) {
-                    addLog("读取 scrcpy 视频元数据失败", LogLevel.ERROR)
-                    _screenState.value = ScreenState.Error("读取 scrcpy 视频元数据失败")
+                    val errMsg = resolveServerFailureMessage("读取 scrcpy 视频元数据失败")
+                    addLog("读取 scrcpy 视频元数据失败 -> $errMsg", LogLevel.ERROR)
+                    _screenState.value = ScreenState.Error(errMsg)
                     try { stream.close() } catch (_: Exception) {}
                     try { serverProcessStream?.close() } catch (_: Exception) {}
                     return@launch
@@ -1128,6 +1221,7 @@ class ScrcpyController(
                             if (!stream.readFully(packetBuf, 0, packetSize)) break
 
                             packetCount++
+                            hasDecodedAnyFrame.set(true)
                             if (packetCount <= 5 || packetCount % 60 == 0) {
                                 val prefixHex = packetBuf.take(8).joinToString(" ") { String.format("%02X", it) }
                                 val ptsHex = String.format("%016X", ptsAndFlags)
@@ -1137,9 +1231,20 @@ class ScrcpyController(
                             decoder.decodeChunk(packetBuf, 0, packetSize, isConfig, isKeyFrame, rawPts)
                         }
                     }
+                    if (!isExplicitlyStopped && packetCount == 0 &&
+                        (sawEncoderError.get() || sawKilled.get() || firstServerErrorMsg.get() != null)) {
+                        val errMsg = resolveServerFailureMessage("视频流未收到有效帧即中断")
+                        addLog("投屏未收到任何视频帧即断开 -> $errMsg", LogLevel.ERROR)
+                        _screenState.value = ScreenState.Error(errMsg)
+                    }
                 } catch (e: Exception) {
                     if (!isExplicitlyStopped) {
                         addLog("视频传输中断: ${e.message}", LogLevel.WARN)
+                        if (packetCount == 0 && (sawEncoderError.get() || sawKilled.get() || firstServerErrorMsg.get() != null)) {
+                            val errMsg = resolveServerFailureMessage("视频传输中断: ${e.message}")
+                            addLog("投屏失败诊断: $errMsg", LogLevel.ERROR)
+                            _screenState.value = ScreenState.Error(errMsg)
+                        }
                     }
                 } finally {
                     currentDecoder = null

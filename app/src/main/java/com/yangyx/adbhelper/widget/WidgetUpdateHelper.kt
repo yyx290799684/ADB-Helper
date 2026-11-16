@@ -33,6 +33,79 @@ object WidgetUpdateHelper {
     private const val KEY_CACHED_DEVICES_JSON = "cached_devices_json"
     private const val KEY_SCANNED_DEVICES_JSON = "scanned_devices_json"
     private const val KEY_LAST_SCAN_TIME = "last_scan_time"
+    private const val KEY_WIDGET_IS_CONNECTED = "widget_is_connected"
+    private const val KEY_WIDGET_CONN_NAME = "widget_conn_name"
+    private const val KEY_WIDGET_CONN_IP = "widget_conn_ip"
+    private const val KEY_WIDGET_CONN_PORT = "widget_conn_port"
+    private const val KEY_WIDGET_CONN_SERIAL = "widget_conn_serial"
+    private const val KEY_WIDGET_CONN_IS_USB = "widget_conn_is_usb"
+
+    data class WidgetPersistedConnection(
+        val name: String,
+        val ip: String,
+        val port: Int,
+        val serialNo: String,
+        val isUsb: Boolean
+    )
+
+    fun saveWidgetConnectedSnapshot(
+        context: Context,
+        name: String,
+        ip: String,
+        port: Int,
+        serialNo: String,
+        isUsb: Boolean = false
+    ) {
+        try {
+            val cleanIp = ip.substringBefore(":").trim()
+            val cleanPort = if (port > 0) port else (ip.substringAfter(":", "5555").toIntOrNull() ?: 5555)
+            context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_WIDGET_IS_CONNECTED, true)
+                .putString(KEY_WIDGET_CONN_NAME, name)
+                .putString(KEY_WIDGET_CONN_IP, cleanIp)
+                .putInt(KEY_WIDGET_CONN_PORT, cleanPort)
+                .putString(KEY_WIDGET_CONN_SERIAL, serialNo)
+                .putBoolean(KEY_WIDGET_CONN_IS_USB, isUsb)
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    fun loadWidgetConnectedSnapshot(context: Context): WidgetPersistedConnection? {
+        return try {
+            val sp = context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
+            if (!sp.getBoolean(KEY_WIDGET_IS_CONNECTED, false)) return null
+            val ip = sp.getString(KEY_WIDGET_CONN_IP, "") ?: ""
+            val name = sp.getString(KEY_WIDGET_CONN_NAME, "") ?: ""
+            val port = sp.getInt(KEY_WIDGET_CONN_PORT, 5555)
+            val serial = sp.getString(KEY_WIDGET_CONN_SERIAL, "") ?: ""
+            val isUsb = sp.getBoolean(KEY_WIDGET_CONN_IS_USB, false)
+            if (ip.isBlank() && serial.isBlank() && !isUsb) return null
+            WidgetPersistedConnection(
+                name = name,
+                ip = ip,
+                port = port,
+                serialNo = serial,
+                isUsb = isUsb
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun clearWidgetConnectedSnapshot(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS_CACHE, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_WIDGET_IS_CONNECTED, false)
+                .remove(KEY_WIDGET_CONN_NAME)
+                .remove(KEY_WIDGET_CONN_IP)
+                .remove(KEY_WIDGET_CONN_PORT)
+                .remove(KEY_WIDGET_CONN_SERIAL)
+                .remove(KEY_WIDGET_CONN_IS_USB)
+                .apply()
+        } catch (_: Exception) {}
+    }
 
     fun saveDevicesToCache(context: Context, list: List<WidgetDeviceInfo>) {
         try {
@@ -217,16 +290,60 @@ object WidgetUpdateHelper {
         }
     }
 
-    fun syncWithActiveAppConnection() {
+    @Volatile
+    private var lastProcessRestartProbeTime: Long = 0L
+
+    fun syncWithActiveAppConnection(context: Context? = null) {
         val vm = com.yangyx.adbhelper.ui.AdbViewModel.currentInstance
         if (vm != null) {
             val vmSession = vm.currentSession ?: vm.sessions.value.firstOrNull()
             if (vmSession != null && vmSession.connection.isConnected) {
-                if (WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTED) {
-                    WidgetStateHolder.onConnected(vmSession, vmSession.deviceName, "${vmSession.ip}:${vmSession.port}", vm.sessions.value.size)
+                if (WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTED || WidgetStateHolder.activeSession !== vmSession) {
+                    WidgetStateHolder.onConnected(
+                        vmSession,
+                        vmSession.deviceName,
+                        "${vmSession.ip}:${vmSession.port}",
+                        vm.sessions.value.size,
+                        vmSession.serialNo
+                    )
+                    context?.let {
+                        saveWidgetConnectedSnapshot(
+                            it,
+                            vmSession.deviceName,
+                            vmSession.ip,
+                            vmSession.port,
+                            vmSession.serialNo,
+                            vmSession.connection.isUsb
+                        )
+                    }
                 }
-            } else if (vm.connectionState.value is com.yangyx.adbhelper.ui.ConnectionState.Disconnected && WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) {
+            } else if (vmSession == null &&
+                vm.connectionState.value is com.yangyx.adbhelper.ui.ConnectionState.Disconnected &&
+                WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED
+            ) {
                 WidgetStateHolder.onDisconnected()
+                context?.let { clearWidgetConnectedSnapshot(it) }
+            }
+        } else if (context != null && WidgetStateHolder.currentState == WidgetStateHolder.State.DISCONNECTED) {
+            val snapshot = loadWidgetConnectedSnapshot(context)
+            if (snapshot != null) {
+                WidgetStateHolder.restoreConnectedFromSnapshot(
+                    name = snapshot.name.ifBlank { snapshot.ip },
+                    ip = if (snapshot.isUsb) "USB" else "${snapshot.ip}:${snapshot.port}",
+                    serial = snapshot.serialNo
+                )
+                val now = System.currentTimeMillis()
+                if (now - lastProcessRestartProbeTime > 30_000L) {
+                    lastProcessRestartProbeTime = now
+                    val appCtx = context.applicationContext
+                    helperScope.launch {
+                        try {
+                            val app = appCtx as? android.app.Application ?: return@launch
+                            val adbVm = com.yangyx.adbhelper.ui.AdbViewModel.getOrCreate(app)
+                            adbVm.performConnectionHealthCheck(appCtx, force = true)
+                        } catch (_: Exception) {}
+                    }
+                }
             }
         }
     }
@@ -382,7 +499,7 @@ object WidgetUpdateHelper {
             }
 
             // 同步应用前台与活跃 ADB 会话连接状态
-            syncWithActiveAppConnection()
+            syncWithActiveAppConnection(context)
 
             // 检查扫描结果是否超过 10 分钟有效期
             if (WidgetStateHolder.checkAndExpireScan()) {
@@ -399,7 +516,7 @@ object WidgetUpdateHelper {
     }
 
     fun build2x2Views(context: Context): RemoteViews {
-        syncWithActiveAppConnection()
+        syncWithActiveAppConnection(context)
         checkAndRefreshMediaStateIfNeeded(context)
         val views = RemoteViews(context.packageName, R.layout.widget_quick_2x2)
         val state = WidgetStateHolder.currentState
@@ -598,7 +715,7 @@ object WidgetUpdateHelper {
     }
 
     fun build4x2Views(context: Context): RemoteViews {
-        syncWithActiveAppConnection()
+        syncWithActiveAppConnection(context)
         checkAndRefreshMediaStateIfNeeded(context)
         if (WidgetStateHolder.checkAndExpireScan()) {
             clearScannedDevicesCache(context)

@@ -73,9 +73,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.InputStream
 
@@ -201,7 +204,7 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
      * 从桌面小部件快速发起与最近/常用设备的连接
      */
     fun connectLatestDevice() {
-        if (_connectionState.value is ConnectionState.Connected) {
+        if (_connectionState.value is ConnectionState.Connected && activeConnection?.isConnected == true) {
             _actionMessage.value = "设备已处于连接状态"
             return
         }
@@ -1105,32 +1108,99 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             }
         } else {
             autoStartMirrorOnConnect = true
-            connectLatestDevice()
+            val snapshot = WidgetUpdateHelper.loadWidgetConnectedSnapshot(getApplication())
+            if (snapshot != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    val conn = reconnectAndEnsureSession(
+                        fallbackIp = snapshot.ip,
+                        fallbackPort = snapshot.port,
+                        fallbackName = snapshot.name,
+                        fallbackSerial = snapshot.serialNo,
+                        timeoutMs = 4500,
+                        forceWireProbe = false
+                    )
+                    if (conn == null) {
+                        autoStartMirrorOnConnect = false
+                        handleUnrecoverableWidgetDisconnect()
+                        withContext(Dispatchers.Main) {
+                            _actionMessage.value = "自动重连失败，设备已回到未连接状态"
+                        }
+                    }
+                }
+            } else {
+                connectLatestDevice()
+            }
+        }
+    }
+
+    fun ensureSessionFromWidgetOpen() {
+        val sess = currentSession
+        if (sess != null && sess.connection.isConnected) return
+        val snapshot = WidgetUpdateHelper.loadWidgetConnectedSnapshot(getApplication())
+        if (sess == null && snapshot == null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val conn = reconnectAndEnsureSession(
+                fallbackIp = snapshot?.ip ?: "",
+                fallbackPort = snapshot?.port ?: 5555,
+                fallbackName = snapshot?.name ?: "",
+                fallbackSerial = snapshot?.serialNo ?: "",
+                timeoutMs = 4500,
+                forceWireProbe = false
+            )
+            if (conn == null) {
+                handleUnrecoverableWidgetDisconnect()
+                withContext(Dispatchers.Main) {
+                    _actionMessage.value = "自动重连失败，设备已回到未连接状态"
+                }
+            }
         }
     }
 
     init {
         viewModelScope.launch {
-            _connectionState.collect { state ->
+            _connectionState.drop(1).collect { state ->
                 when (state) {
                     is ConnectionState.Connected -> {
                         val session = currentSession
-                        WidgetStateHolder.onConnected(session, state.deviceName, state.ip, _sessions.value.size)
+                        WidgetStateHolder.onConnected(
+                            session,
+                            state.deviceName,
+                            session?.let { "${it.ip}:${it.port}" } ?: state.ip,
+                            _sessions.value.size,
+                            session?.serialNo ?: ""
+                        )
+                        WidgetUpdateHelper.saveWidgetConnectedSnapshot(
+                            getApplication(),
+                            state.deviceName,
+                            session?.ip ?: state.ip,
+                            session?.port ?: lastConnectedPort,
+                            session?.serialNo ?: "",
+                            session?.connection?.isUsb == true
+                        )
                         WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(getApplication(), 10 * 60 * 1000L)
+                        startPeriodicConnectionHealthCheck()
                         if (autoStartMirrorOnConnect) {
                             autoStartMirrorOnConnect = false
                             triggerMirrorFromWidget()
                         }
                     }
                     is ConnectionState.Connecting -> {
-                        WidgetStateHolder.onConnecting()
+                        if (!isAutoReconnecting) {
+                            WidgetStateHolder.onConnecting()
+                        }
                     }
                     is ConnectionState.Disconnected, is ConnectionState.Error -> {
-                        if (WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING && activeConnectJob?.isActive != true) {
+                        if (!isAutoReconnecting &&
+                            WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING &&
+                            activeConnectJob?.isActive != true
+                        ) {
                             WidgetStateHolder.onDisconnected()
+                            WidgetUpdateHelper.clearWidgetConnectedSnapshot(getApplication())
                             WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
                             autoStartMirrorOnConnect = false
                             if (_sessions.value.isEmpty()) {
+                                periodicHealthCheckJob?.cancel()
+                                periodicHealthCheckJob = null
                                 com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
                             }
                         }
@@ -1141,18 +1211,55 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            _sessions.collect { sessionList ->
+            _sessions.drop(1).collect { sessionList ->
                 val active = currentSession
                 if (active != null) {
-                    WidgetStateHolder.onConnected(active, active.deviceName, "${active.ip}:${active.port}", sessionList.size)
+                    WidgetStateHolder.onConnected(
+                        active,
+                        active.deviceName,
+                        "${active.ip}:${active.port}",
+                        sessionList.size,
+                        active.serialNo
+                    )
+                    WidgetUpdateHelper.saveWidgetConnectedSnapshot(
+                        getApplication(),
+                        active.deviceName,
+                        active.ip,
+                        active.port,
+                        active.serialNo,
+                        active.connection.isUsb
+                    )
                     WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(getApplication(), 10 * 60 * 1000L)
+                    startPeriodicConnectionHealthCheck()
                 } else if (sessionList.isNotEmpty()) {
                     val first = sessionList.first()
-                    WidgetStateHolder.onConnected(first, first.deviceName, "${first.ip}:${first.port}", sessionList.size)
+                    WidgetStateHolder.onConnected(
+                        first,
+                        first.deviceName,
+                        "${first.ip}:${first.port}",
+                        sessionList.size,
+                        first.serialNo
+                    )
+                    WidgetUpdateHelper.saveWidgetConnectedSnapshot(
+                        getApplication(),
+                        first.deviceName,
+                        first.ip,
+                        first.port,
+                        first.serialNo,
+                        first.connection.isUsb
+                    )
                     WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(getApplication(), 10 * 60 * 1000L)
-                } else if (_connectionState.value !is ConnectionState.Connecting && WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING && activeConnectJob?.isActive != true) {
+                    startPeriodicConnectionHealthCheck()
+                } else if (!isAutoReconnecting &&
+                    _connectionState.value !is ConnectionState.Connecting &&
+                    WidgetStateHolder.currentState != WidgetStateHolder.State.CONNECTING &&
+                    activeConnectJob?.isActive != true
+                ) {
                     WidgetStateHolder.onDisconnected()
+                    WidgetUpdateHelper.clearWidgetConnectedSnapshot(getApplication())
                     WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
+                    periodicHealthCheckJob?.cancel()
+                    periodicHealthCheckJob = null
                 }
                 WidgetUpdateHelper.updateAllWidgets(getApplication())
             }
@@ -1453,27 +1560,337 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         _actionMessage.value = null
     }
 
-    suspend fun ensureConnection(): Boolean {
-        val current = activeConnection
-        if (current != null && current.isConnected) {
-            return true
-        }
-        if (lastConnectedIp.isNotBlank() && lastConnectedPort > 0) {
-            try {
-                _connectionState.value = ConnectionState.Connecting("正在重新连接 $lastConnectedIp:$lastConnectedPort ...")
-                val conn = AdbConnection(lastConnectedIp, lastConnectedPort, getApplication())
-                conn.connect(6000)
-                activeConnection = conn
-                scrcpyController = ScrcpyController(conn, viewModelScope, getApplication())
-                _connectionState.value = ConnectionState.Connected(lastConnectedIp, lastConnectedDeviceName.ifBlank { "ADB 设备" })
-                com.yangyx.adbhelper.service.AdbSessionService.startService(getApplication(), lastConnectedDeviceName, lastConnectedIp)
-                return true
-            } catch (e: Exception) {
-                _connectionState.value = ConnectionState.Error("自动重连失败: ${e.message}")
-                return false
+    private val widgetReconnectMutex = Mutex()
+    private val healthCheckMutex = Mutex()
+    @Volatile
+    private var isAutoReconnecting: Boolean = false
+    private var periodicHealthCheckJob: Job? = null
+    @Volatile
+    private var lastHealthCheckSuccessTime: Long = 0L
+
+    private fun startPeriodicConnectionHealthCheck() {
+        if (periodicHealthCheckJob?.isActive == true) return
+        periodicHealthCheckJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(10 * 60 * 1000L)
+                val app = getApplication<Application>()
+                val shouldCheck = _sessions.value.isNotEmpty() ||
+                    _connectionState.value is ConnectionState.Connected ||
+                    WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED ||
+                    WidgetUpdateHelper.loadWidgetConnectedSnapshot(app) != null
+                if (!shouldCheck) break
+                performConnectionHealthCheck(app, force = false)
             }
         }
-        return false
+    }
+
+    private suspend fun syncWidgetAndServiceConnected(session: AdbDeviceSession?, conn: AdbConnection) {
+        val app = getApplication<Application>()
+        val name = session?.deviceName?.ifBlank { null }
+            ?: lastConnectedDeviceName.ifBlank { null }
+            ?: WidgetStateHolder.deviceName.ifBlank { "ADB 设备" }
+        val ip = session?.ip?.ifBlank { null } ?: conn.ip
+        val port = session?.port?.takeIf { it > 0 } ?: conn.port
+        val serial = session?.serialNo?.ifBlank { null } ?: WidgetStateHolder.deviceSerial
+        val displayAddr = if (conn.isUsb) "USB" else "$ip:$port"
+
+        lastConnectedIp = ip
+        lastConnectedPort = port
+        lastConnectedDeviceName = name
+        if (_connectionState.value !is ConnectionState.Connected) {
+            _connectionState.value = ConnectionState.Connected(ip, name)
+        }
+        WidgetStateHolder.onConnected(
+            session = session,
+            name = name,
+            ip = displayAddr,
+            count = _sessions.value.size.coerceAtLeast(1),
+            serial = serial
+        )
+        WidgetUpdateHelper.saveWidgetConnectedSnapshot(
+            context = app,
+            name = name,
+            ip = ip,
+            port = port,
+            serialNo = serial,
+            isUsb = conn.isUsb
+        )
+        WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(app, 10 * 60 * 1000L)
+        if (com.yangyx.adbhelper.service.AdbSessionService.activeInstance == null) {
+            com.yangyx.adbhelper.service.AdbSessionService.startService(app, name, ip)
+        }
+        startPeriodicConnectionHealthCheck()
+        WidgetUpdateHelper.updateAllWidgets(app)
+    }
+
+    suspend fun handleUnrecoverableWidgetDisconnect() {
+        val app = getApplication<Application>()
+        periodicHealthCheckJob?.cancel()
+        periodicHealthCheckJob = null
+        withContext(Dispatchers.Main) {
+            if (activeConnectJob?.isActive != true) {
+                disconnectAll(stopSessionService = true)
+            }
+        }
+        WidgetStateHolder.onDisconnected()
+        WidgetUpdateHelper.clearWidgetConnectedSnapshot(app)
+        WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(app)
+        com.yangyx.adbhelper.service.AdbSessionService.stopService(app)
+        WidgetUpdateHelper.updateAllWidgets(app)
+    }
+
+    /**
+     * 与主程序一致的自动重连与会话维持入口（支持在原连接上直接重连，也支持进程重建/IP变动后的智能探测重建）。
+     * 返回可用的 AdbConnection，若彻底无法建立连接则返回 null。
+     */
+    suspend fun reconnectAndEnsureSession(
+        fallbackIp: String = "",
+        fallbackPort: Int = 5555,
+        fallbackName: String = "",
+        fallbackSerial: String = "",
+        timeoutMs: Int = 4500,
+        forceWireProbe: Boolean = false
+    ): AdbConnection? = widgetReconnectMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val app = getApplication<Application>()
+
+            val existingSession = currentSession ?: _sessions.value.firstOrNull()
+            val existingConn = existingSession?.connection ?: activeConnection ?: WidgetStateHolder.activeConnection
+            if (existingConn != null) {
+                val alive = if (forceWireProbe) {
+                    existingConn.probeAlive(2000L)
+                } else {
+                    existingConn.isConnectionAlive()
+                }
+                if (alive) {
+                    syncWidgetAndServiceConnected(existingSession, existingConn)
+                    return@withContext existingConn
+                }
+                if (existingConn.isUsb) {
+                    return@withContext null
+                }
+                isAutoReconnecting = true
+                try {
+                    if (existingConn.ensureConnected(timeoutMs, verifyWire = false)) {
+                        syncWidgetAndServiceConnected(existingSession, existingConn)
+                        return@withContext existingConn
+                    }
+                } finally {
+                    isAutoReconnecting = false
+                }
+            }
+
+            val snapshot = WidgetUpdateHelper.loadWidgetConnectedSnapshot(app)
+            val targetSerial = fallbackSerial.ifBlank {
+                existingSession?.serialNo ?: WidgetStateHolder.deviceSerial.ifBlank { snapshot?.serialNo ?: "" }
+            }
+            val targetName = fallbackName.ifBlank {
+                existingSession?.deviceName
+                    ?: lastConnectedDeviceName.ifBlank {
+                        WidgetStateHolder.deviceName.ifBlank { snapshot?.name ?: "" }
+                    }
+            }
+            val rawHolderIp = WidgetStateHolder.deviceIp.substringBefore(":").trim()
+            val rawHolderPort = WidgetStateHolder.deviceIp.substringAfter(":", "").toIntOrNull()
+            val targetIp = fallbackIp.ifBlank {
+                existingSession?.ip
+                    ?: existingConn?.ip
+                    ?: lastConnectedIp.ifBlank {
+                        rawHolderIp.ifBlank { snapshot?.ip ?: "" }
+                    }
+            }.substringBefore(":").trim()
+            val targetPort = when {
+                fallbackIp.isNotBlank() && fallbackPort > 0 -> fallbackPort
+                existingSession != null && existingSession.port > 0 -> existingSession.port
+                existingConn != null && existingConn.port > 0 -> existingConn.port
+                lastConnectedIp.isNotBlank() && lastConnectedPort > 0 -> lastConnectedPort
+                rawHolderPort != null && rawHolderPort > 0 -> rawHolderPort
+                snapshot != null && snapshot.port > 0 -> snapshot.port
+                else -> 5555
+            }
+
+            if ((snapshot?.isUsb == true && targetIp == "USB") || targetIp == "USB") {
+                return@withContext null
+            }
+
+            val candidates = linkedSetOf<Pair<String, Int>>()
+            if (targetIp.isNotBlank() && targetPort > 0) {
+                candidates.add(targetIp to targetPort)
+            }
+
+            val allDevices = try { repository.getAllDevicesDirect() } catch (_: Exception) { emptyList() }
+            val groups = if (allDevices.isNotEmpty()) groupDevicesBySerial(allDevices) else emptyList()
+            val matchedGroup = when {
+                targetSerial.isNotBlank() -> groups.firstOrNull { it.serialNo == targetSerial }
+                targetName.isNotBlank() -> groups.firstOrNull { g ->
+                    g.displayName.equals(targetName, ignoreCase = true) ||
+                        g.deviceName.equals(targetName, ignoreCase = true) ||
+                        g.aliasName.equals(targetName, ignoreCase = true) ||
+                        g.ipRecords.any { it.aliasName.equals(targetName, ignoreCase = true) || it.name.equals(targetName, ignoreCase = true) }
+                }
+                targetIp.isNotBlank() -> groups.firstOrNull { g -> g.ipRecords.any { it.ipAddress == targetIp } }
+                else -> null
+            }
+            matchedGroup?.ipRecords?.forEach { rec ->
+                if (rec.ipAddress.isNotBlank() && rec.port > 0) {
+                    candidates.add(rec.ipAddress to rec.port)
+                }
+            }
+
+            if (candidates.isEmpty()) {
+                return@withContext null
+            }
+
+            isAutoReconnecting = true
+            try {
+                for ((candIp, candPort) in candidates) {
+                    if (!isPortReachable(candIp, candPort, 1500)) {
+                        continue
+                    }
+                    var newConn: AdbConnection? = null
+                    try {
+                        newConn = AdbConnection(candIp, candPort, app)
+                        newConn.connect(timeoutMs)
+
+                        val rawSerial = try { newConn.executeShell("getprop ro.serialno", 2500).trim() } catch (_: Exception) { "" }
+                        val resolvedSerial = if (rawSerial.isNotEmpty() && rawSerial != "unknown") rawSerial else targetSerial
+                        val marketName = try { newConn.executeShell("getprop ro.product.marketname", 2000).trim() } catch (_: Exception) { "" }
+                        val model = try { newConn.executeShell("getprop ro.product.model", 2000).trim() } catch (_: Exception) { "" }
+                        val brand = try { newConn.executeShell("getprop ro.product.brand", 2000).trim() } catch (_: Exception) { "" }
+                        val detectedName = when {
+                            marketName.isNotEmpty() -> marketName
+                            model.isNotEmpty() -> "$brand $model".trim()
+                            newConn.deviceBanner.isNotBlank() -> newConn.deviceBanner
+                            else -> targetName.ifBlank { "$candIp:$candPort" }
+                        }
+                        val fullModel = if (marketName.isNotEmpty() && model.isNotEmpty()) "$marketName ($model)" else model
+                        val savedAlias = try {
+                            saveDeviceRecord(
+                                ip = candIp,
+                                port = candPort,
+                                serialNo = resolvedSerial,
+                                name = detectedName,
+                                model = fullModel
+                            )
+                        } catch (_: Exception) { "" }
+
+                        val finalTitle = when {
+                            matchedGroup?.aliasName?.isNotBlank() == true -> matchedGroup.aliasName
+                            savedAlias.isNotBlank() -> savedAlias
+                            targetName.isNotBlank() && !targetName.contains(":") -> targetName
+                            else -> detectedName
+                        }
+
+                        try { existingSession?.scrcpyController?.stopMirroring() } catch (_: Exception) {}
+                        try { existingConn?.disconnect() } catch (_: Exception) {}
+
+                        val newController = ScrcpyController(newConn, viewModelScope, app)
+                        val initialTerminal = existingSession?.terminalOutput
+                            ?: "=== ADB Helper 终端 ===\n已自动重连设备: $finalTitle ($candIp:$candPort)\n终端就绪，输入命令并按回车执行...\n\nshell@android:/ $ "
+                        val newSession = AdbDeviceSession(
+                            id = existingSession?.id ?: java.util.UUID.randomUUID().toString(),
+                            ip = candIp,
+                            port = candPort,
+                            deviceName = finalTitle,
+                            serialNo = resolvedSerial,
+                            model = fullModel.ifBlank { existingSession?.model ?: "" },
+                            iconType = matchedGroup?.iconType ?: existingSession?.iconType ?: "phone",
+                            connection = newConn,
+                            scrcpyController = newController,
+                            terminalOutput = initialTerminal,
+                            terminalPath = existingSession?.terminalPath ?: "/",
+                            isRootMode = existingSession?.isRootMode ?: false,
+                            currentRemotePath = existingSession?.currentRemotePath ?: "/sdcard",
+                            remoteFiles = existingSession?.remoteFiles ?: emptyList(),
+                            systemInfo = existingSession?.systemInfo ?: SystemInfo(),
+                            deviceDensity = existingSession?.deviceDensity ?: DeviceDensityInfo(),
+                            quickSettings = existingSession?.quickSettings ?: DeviceQuickSettingsState(),
+                            mediaPlaybackInfo = existingSession?.mediaPlaybackInfo ?: MediaPlaybackInfo(),
+                            cachedStaticInfo = existingSession?.cachedStaticInfo,
+                            installedApps = existingSession?.installedApps ?: emptyList(),
+                            appDiagnosisLogs = existingSession?.appDiagnosisLogs ?: "",
+                            runningProcesses = existingSession?.runningProcesses ?: emptyList(),
+                            selectedNavIndex = existingSession?.selectedNavIndex ?: 0
+                        )
+
+                        withContext(Dispatchers.Main) {
+                            registerAndActivateSession(newSession)
+                        }
+                        syncWidgetAndServiceConnected(newSession, newConn)
+                        return@withContext newConn
+                    } catch (_: Exception) {
+                        try { newConn?.disconnect() } catch (_: Exception) {}
+                    }
+                }
+            } finally {
+                isAutoReconnecting = false
+            }
+
+            return@withContext null
+        }
+    }
+
+    /**
+     * 执行 10 分钟周期的连接存活检测：
+     * 1. 通过真实通信探活；
+     * 2. 若失联则自动尝试维持/重建会话（失败后延时 1.5s 再试一次）；
+     * 3. 确认无法重建连接后，彻底断开并使主程序与小部件同步回到未连接初始状态。
+     */
+    suspend fun performConnectionHealthCheck(context: Context, force: Boolean = false): Boolean = healthCheckMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val app = context.applicationContext
+            val snapshot = WidgetUpdateHelper.loadWidgetConnectedSnapshot(app)
+            val hasLogicalConnection = (WidgetStateHolder.currentState == WidgetStateHolder.State.CONNECTED) ||
+                (snapshot != null) ||
+                (_connectionState.value is ConnectionState.Connected) ||
+                (_sessions.value.isNotEmpty())
+
+            if (!hasLogicalConnection) {
+                WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(app)
+                return@withContext false
+            }
+
+            if (!force && System.currentTimeMillis() - lastHealthCheckSuccessTime < 30_000L) {
+                val curr = currentSession?.connection ?: activeConnection
+                if (curr != null && curr.isConnectionAlive()) {
+                    return@withContext true
+                }
+            }
+
+            val firstTry = reconnectAndEnsureSession(
+                timeoutMs = 4500,
+                forceWireProbe = true
+            )
+            if (firstTry != null) {
+                lastHealthCheckSuccessTime = System.currentTimeMillis()
+                WidgetUpdateHelper.checkAndRefreshMediaStateIfNeeded(app)
+                WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(app, 10 * 60 * 1000L)
+                return@withContext true
+            }
+
+            val isUsbOnly = (currentSession?.connection ?: activeConnection ?: WidgetStateHolder.activeConnection)?.isUsb == true ||
+                (snapshot?.isUsb == true && snapshot.ip == "USB")
+            if (!isUsbOnly) {
+                delay(1500L)
+                val secondTry = reconnectAndEnsureSession(
+                    timeoutMs = 4500,
+                    forceWireProbe = true
+                )
+                if (secondTry != null) {
+                    lastHealthCheckSuccessTime = System.currentTimeMillis()
+                    WidgetUpdateHelper.checkAndRefreshMediaStateIfNeeded(app)
+                    WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(app, 10 * 60 * 1000L)
+                    return@withContext true
+                }
+            }
+
+            handleUnrecoverableWidgetDisconnect()
+            return@withContext false
+        }
+    }
+
+    suspend fun ensureConnection(): Boolean {
+        return reconnectAndEnsureSession(timeoutMs = 6000, forceWireProbe = false) != null
     }
 
     // Connection Concurrency & Session Management
@@ -1576,7 +1993,17 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             session.deviceName,
             session.ip
         )
-        WidgetStateHolder.onConnected(session, session.deviceName, "${session.ip}:${session.port}", _sessions.value.size)
+        WidgetStateHolder.onConnected(session, session.deviceName, "${session.ip}:${session.port}", _sessions.value.size, session.serialNo)
+        WidgetUpdateHelper.saveWidgetConnectedSnapshot(
+            getApplication(),
+            session.deviceName,
+            session.ip,
+            session.port,
+            session.serialNo,
+            session.connection.isUsb
+        )
+        WidgetUpdateHelper.scheduleConnectionHealthCheckAlarm(getApplication(), 10 * 60 * 1000L)
+        startPeriodicConnectionHealthCheck()
         WidgetUpdateHelper.updateAllWidgets(getApplication())
         fetchReverseRules()
     }
@@ -1707,7 +2134,13 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 _currentSessionId.value = null
                 activeConnection = null
                 scrcpyController = null
+                periodicHealthCheckJob?.cancel()
+                periodicHealthCheckJob = null
                 _connectionState.value = ConnectionState.Disconnected
+                WidgetStateHolder.onDisconnected()
+                WidgetUpdateHelper.clearWidgetConnectedSnapshot(getApplication())
+                WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
+                WidgetUpdateHelper.updateAllWidgets(getApplication())
                 com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
                 com.yangyx.adbhelper.service.MirrorLiveNotificationManager.cancel(getApplication())
                 resetDeviceSessionStates("", "未连接")
@@ -1933,6 +2366,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 _connectionState.value = ConnectionState.Error(e.message ?: "连接超时或拒绝连接")
                 WidgetStateHolder.onDisconnected()
+                WidgetUpdateHelper.clearWidgetConnectedSnapshot(getApplication())
+                WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
                 WidgetUpdateHelper.updateAllWidgets(getApplication())
                 if (_sessions.value.isEmpty()) {
                     com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
@@ -2079,6 +2514,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
             if (!isConnected) {
                 _connectionState.value = ConnectionState.Error("设备 [$displayName] 的所有 $total 个历史 IP 均无法连通，请确认手机已开启无线调试并与本机在同一局域网。")
                 WidgetStateHolder.onDisconnected()
+                WidgetUpdateHelper.clearWidgetConnectedSnapshot(getApplication())
+                WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
                 WidgetUpdateHelper.updateAllWidgets(getApplication())
                 if (_sessions.value.isEmpty()) {
                     com.yangyx.adbhelper.service.AdbSessionService.stopService(getApplication())
@@ -2272,6 +2709,8 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnectAll(stopSessionService: Boolean = true) {
         cancelPreviousConnectTask()
         currentConnectId++
+        periodicHealthCheckJob?.cancel()
+        periodicHealthCheckJob = null
         _sessions.value.forEach { session ->
             try { session.scrcpyController.stopMirroring() } catch (_: Exception) {}
             try { session.connection.disconnect() } catch (_: Exception) {}
@@ -2288,6 +2727,10 @@ class AdbViewModel(application: Application) : AndroidViewModel(application) {
         activeConnection?.disconnect()
         activeConnection = null
         _connectionState.value = ConnectionState.Disconnected
+        WidgetStateHolder.onDisconnected()
+        WidgetUpdateHelper.clearWidgetConnectedSnapshot(getApplication())
+        WidgetUpdateHelper.cancelConnectionHealthCheckAlarm(getApplication())
+        WidgetUpdateHelper.updateAllWidgets(getApplication())
         resetDeviceSessionStates("", "未连接")
         forwardManager.stopAllForwards()
         _reverseRules.value = emptyList()

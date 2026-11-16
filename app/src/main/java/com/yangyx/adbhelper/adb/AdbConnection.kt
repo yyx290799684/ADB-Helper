@@ -47,15 +47,17 @@ class AdbConnection(
     private val openWaitLocks = ConcurrentHashMap<Int, java.lang.Object>()
 
     private var readerThread: Thread? = null
+    private val connectionGeneration = java.util.concurrent.atomic.AtomicLong(0L)
 
     private fun safeWriteMessage(msg: AdbMessage) {
-        val out = output ?: return
+        val out = output ?: throw java.io.IOException("ADB output stream is null")
         synchronized(writeLock) {
             msg.write(out)
         }
     }
 
     fun connect(timeoutMs: Int = 10000, onStatusUpdate: ((String) -> Unit)? = null) {
+        val gen = connectionGeneration.incrementAndGet()
         if (!isUsb) {
             val s = Socket()
             s.connect(java.net.InetSocketAddress(ip, port), timeoutMs)
@@ -166,7 +168,9 @@ class AdbConnection(
             try {
                 readerLoop()
             } catch (e: Exception) {
-                disconnect()
+                if (connectionGeneration.get() == gen) {
+                    disconnect()
+                }
             }
         }, "AdbReaderThread-$ip")
         readerThread?.start()
@@ -206,6 +210,7 @@ class AdbConnection(
                     val localId = msg.arg1
                     val stream = streams.remove(localId)
                     if (stream != null) {
+                        stream.rejectedByPeer = true
                         stream.markClosedLocally()
                     }
                     val lock = openWaitLocks.remove(localId)
@@ -338,9 +343,11 @@ class AdbConnection(
     }
 
     @Synchronized
-    fun ensureConnected(timeoutMs: Int = 5000): Boolean {
-        if (isConnected && socket?.isConnected == true && socket?.isClosed == false) {
-            return true
+    fun ensureConnected(timeoutMs: Int = 5000, verifyWire: Boolean = false): Boolean {
+        if (isConnectionAlive()) {
+            if (!verifyWire || probeAlive(minOf(timeoutMs.toLong(), 2500L))) {
+                return true
+            }
         }
         if (isUsb) return false
         if (ip.isBlank() || port <= 0) return false
@@ -350,6 +357,7 @@ class AdbConnection(
             connect(timeoutMs)
             isConnected
         } catch (_: Exception) {
+            disconnect()
             false
         }
     }
@@ -359,6 +367,25 @@ class AdbConnection(
         if (isUsb) return usbConnection != null
         val s = socket ?: return false
         return s.isConnected && !s.isClosed && !s.isInputShutdown && !s.isOutputShutdown
+    }
+
+    /**
+     * 通过轻量级 shell 指令探测底层 TCP/ADB 会话是否真正活跃，避免半开连接误判为在线。
+     */
+    fun probeAlive(timeoutMs: Long = 2000L): Boolean {
+        if (!isConnectionAlive()) return false
+        return try {
+            val stream = openStreamInternal(
+                destination = "shell:echo __adb_alive__",
+                openTimeoutMs = timeoutMs,
+                allowAutoReconnect = false
+            )
+            val result = stream.readAllText(timeoutMs)
+            stream.close()
+            result.contains("__adb_alive__")
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun isRemotePortReachable(timeoutMs: Int = 2000): Boolean {
@@ -375,8 +402,16 @@ class AdbConnection(
     }
 
     fun openStream(destination: String): AdbStream {
-        if (!isConnected || socket?.isClosed == true) {
-            val reconnected = ensureConnected(5000)
+        return openStreamInternal(destination, openTimeoutMs = 5000L, allowAutoReconnect = true)
+    }
+
+    private fun openStreamInternal(
+        destination: String,
+        openTimeoutMs: Long = 5000L,
+        allowAutoReconnect: Boolean = true
+    ): AdbStream {
+        if (!isConnectionAlive()) {
+            val reconnected = if (allowAutoReconnect) ensureConnected(5000) else false
             if (!reconnected) {
                 throw IllegalStateException("ADB connection is not active")
             }
@@ -392,16 +427,32 @@ class AdbConnection(
         val destBytes = "$destination\u0000".toByteArray(Charsets.UTF_8)
         val msg = AdbMessage(AdbMessage.CMD_OPEN, localId, 0, destBytes)
 
-        synchronized(lock) {
-            safeWriteMessage(msg)
-            lock.wait(5000)
+        var writeFailed = false
+        try {
+            synchronized(lock) {
+                safeWriteMessage(msg)
+                lock.wait(openTimeoutMs)
+            }
+        } catch (_: Exception) {
+            writeFailed = true
+        } finally {
+            openWaitLocks.remove(localId)
         }
 
-        openWaitLocks.remove(localId)
+        if (writeFailed || (stream.remoteId == 0 && !stream.rejectedByPeer)) {
+            streams.remove(localId)
+            if (allowAutoReconnect && !isUsb) {
+                disconnect()
+                if (ensureConnected(5000)) {
+                    return openStreamInternal(destination, openTimeoutMs, allowAutoReconnect = false)
+                }
+            }
+            throw Exception("Failed to open ADB stream to $destination (Timeout or Disconnected)")
+        }
 
         if (stream.remoteId == 0) {
             streams.remove(localId)
-            throw Exception("Failed to open ADB stream to $destination (Timeout or Rejected)")
+            throw Exception("Failed to open ADB stream to $destination (Rejected)")
         }
 
         return stream
@@ -468,6 +519,7 @@ class AdbConnection(
     }
 
     fun disconnect() {
+        connectionGeneration.incrementAndGet()
         isConnected = false
         try {
             socket?.close()
@@ -477,6 +529,13 @@ class AdbConnection(
         socket = null
         input = null
         output = null
+        val pendingLocks = openWaitLocks.values.toList()
+        openWaitLocks.clear()
+        pendingLocks.forEach { lock ->
+            synchronized(lock) {
+                lock.notifyAll()
+            }
+        }
         streams.values.forEach { it.markClosedLocally() }
         streams.clear()
     }
